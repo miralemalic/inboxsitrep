@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.db
+/data/
+/ui/node_modules/
+/ui/dist/
+.venv/
+build/
+*.egg-info/
+plugin/evals/fleets/
+plugin/evals/results/

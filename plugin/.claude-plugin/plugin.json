@@ -1,0 +1,30 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "inboxsitrep",
+  "version": "1.0.0",
+  "description": "Cold email deliverability analyst: reads your PlusVibe, Instantly or EmailBison fleet through Inbox Sitrep, finds what is breaking (Gmail blocks, blocklists, tenant blocks, quiet spam folders, leads running out) and proposes fixes you approve one at a time.",
+  "author": {
+    "name": "miralemalic"
+  },
+  "homepage": "https://github.com/miralemalic/inboxsitrep",
+  "license": "MIT",
+  "skills": [
+    "./skills"
+  ],
+  "commands": [
+    "./commands"
+  ],
+  "mcpServers": {
+    "inboxsitrep": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "command -v inboxsitrep >/dev/null 2>&1 && exec inboxsitrep mcp || exec python3 -m inboxsitrep mcp"
+      ],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}/..",
+        "INBOXSITREP_PLUGIN": "${CLAUDE_PLUGIN_ROOT}"
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inboxsitrep"
+dynamic = ["version"]
+description = "A cold email deliverability analyst for PlusVibe, Instantly and EmailBison: desktop app, Claude Code plugin, MCP server"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "miralemalic"}]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# A native window on macOS and Windows (on Linux the system's GTK is used).
+window = ["pywebview>=5"]
+
+[project.urls]
+Homepage = "https://github.com/miralemalic/inboxsitrep"
+
+[project.scripts]
+inboxsitrep = "inboxsitrep.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["inboxsitrep*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "inboxsitrep.__version__"}
+
+[tool.setuptools.package-data]
+inboxsitrep = ["static/*", "static/assets/*"]

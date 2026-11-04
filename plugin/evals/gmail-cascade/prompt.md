@@ -1,0 +1,6 @@
+---
+max_turns: 14
+allowed_tools: [Skill, mcp__plugin_inboxsitrep_inboxsitrep__sitrep, mcp__plugin_inboxsitrep_inboxsitrep__numbers, mcp__plugin_inboxsitrep_inboxsitrep__incidents, mcp__plugin_inboxsitrep_inboxsitrep__incident, mcp__plugin_inboxsitrep_inboxsitrep__domain, mcp__plugin_inboxsitrep_inboxsitrep__family, mcp__plugin_inboxsitrep_inboxsitrep__find, mcp__plugin_inboxsitrep_inboxsitrep__bounces, mcp__plugin_inboxsitrep_inboxsitrep__campaigns, mcp__plugin_inboxsitrep_inboxsitrep__preview_change, mcp__plugin_inboxsitrep_inboxsitrep__changes]
+---
+
+Use the deliverability-analyst skill. Look at the fleet named "Fleet 02". What needs my attention, and what should I do first?

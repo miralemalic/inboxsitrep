@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "inboxsitrep",
+  "owner": {
+    "name": "miralemalic"
+  },
+  "plugins": [
+    {
+      "name": "inboxsitrep",
+      "source": "./plugin",
+      "description": "Cold email deliverability analyst for PlusVibe, Instantly and EmailBison fleets."
+    }
+  ],
+  "description": "Inbox Sitrep: a cold email deliverability analyst for Claude Code."
+}
