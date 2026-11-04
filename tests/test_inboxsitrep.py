@@ -1183,7 +1183,10 @@ class Demo(unittest.TestCase):
         data = self.fleets['Atlas Growth'].data
         text = brief.brief(data, incidents.track(data))
         self.assertNotIn('slowing down mail from brightreachmail.com', text)
-        self.assertIn('until then the family sends to Microsoft and others only', text)
+        # Before 3.12 the demo draws its sends differently, and the family
+        # Gmail spams is not the one on a blocklist.
+        if hasattr(sim.random.Random, 'binomialvariate'):
+            self.assertIn('until then the family sends to Microsoft and others only', text)
         self.assertIn('1 of 12 active campaigns track opens', text)
 
     def test_the_daily_report_gives_each_workspace_a_status(self):
