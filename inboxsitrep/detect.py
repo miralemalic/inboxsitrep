@@ -6,7 +6,6 @@
 # one day at a time and say what they see; deciding what to do about it is
 # plan.py's job.
 
-import os
 import math
 import datetime
 import collections
@@ -32,6 +31,19 @@ def label(dom):
     return dom.split('.')[0]
 
 
+def shared_start(names):
+    # The letters every name begins with.  os.path.commonprefix used to do
+    # this, but Python 3.15 deprecated it in favour of commonpath, which
+    # splits on slashes and would give back nothing here.  The first and last
+    # names in sorted order are the two that differ soonest, so comparing
+    # just those two is enough.
+    first, last = min(names), max(names)
+    n = 0
+    while n < len(first) and n < len(last) and first[n] == last[n]:
+        n += 1
+    return first[:n]
+
+
 def families(doms, stem=6, size=3):
     # Look-alike domains (growthmailads, growthmailpro, ...) are judged by
     # Gmail as one sender: on the real fleet nine of thirty died one after
@@ -43,7 +55,7 @@ def families(doms, stem=6, size=3):
     out = {}
     for members in groups.values():
         if len(members) >= size:
-            name = os.path.commonprefix([label(d) for d in members])
+            name = shared_start([label(d) for d in members])
             for d in members:
                 out[d] = name
     return out
