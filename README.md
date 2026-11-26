@@ -7,7 +7,7 @@ off warmup or tracking, all with an undo. It works with PlusVibe, Instantly
 and EmailBison, runs on your own device, and sends a short report to Slack or
 Telegram every morning.
 
-It was built, used and tested against 15+ workspaces, and 200,000+ mailboxes.
+It was built, used and tested against 15+ workspaces and 200,000+ mailboxes.
 
 ![The briefing page](docs/app.png)
 
