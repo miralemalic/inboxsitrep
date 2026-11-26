@@ -292,7 +292,7 @@ Nowoslawski's
 [coldoutboundskills](https://github.com/growthenginenowoslawski/coldoutboundskills)
 (MIT), with higher minimum sends and replies judged against your own workspace.
 The bounce categories follow
-[bouncesitrep](https://github.com/miralemalic/bouncesitrep).
+[Bounce Sitrep](https://github.com/miralemalic/bouncesitrep).
 
 ## License
 
