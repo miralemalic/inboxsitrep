@@ -128,13 +128,19 @@ Reports come to your Telegram chat, and you can ask questions there too.
 
 All of this is in **Settings**.
 
-- **Daily report** at the times you set (08:00 and 17:00 to start with). Every
-  workspace is checked fresh first, and one message covers them all.
-- **Weekly report** on Saturday at 08:00, after Friday's sending is done.
-- **Between reports:** urgent alerts only, checked every 15 minutes on
-  PlusVibe and EmailBison. That means tenant blocks, Gmail or Microsoft
-  starting to refuse a domain, and failed authentication. Blocklists wait for
-  the daily report.
+- **End-of-day report** at the time you set (23:30 to start with): pick one
+  after your last campaign stops sending. Every workspace is checked fresh
+  first, and one message covers them all.
+- **Weekly report** on Saturday at 17:00, after Friday's US sending is done.
+- **Monthly report** on the day of the month you pick (the 1st to start with),
+  or off.
+- **Between reports:** urgent alerts, checked every 15 minutes: tenant blocks,
+  Gmail or Microsoft starting to refuse a domain, failed authentication, and on
+  EmailBison 5 or more mailboxes disconnecting, a workspace that stops sending
+  inside its campaigns' hours, and bounces at 3 times the usual rate. They go
+  to the **urgent channel** if you name one in the Slack settings (or an urgent
+  webhook), else to the report channel. Add each new problem as it's found if
+  you like. Blocklists wait for the reports.
 - **Check every** few hours while the app is open.
 - **Open at login**, so it runs without you remembering to start it.
 

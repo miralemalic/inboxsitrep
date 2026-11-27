@@ -79,27 +79,38 @@ def log(title, body, path=None):
 def channels(cfg):
     # Which channels are set up, from the notify part of the settings.
     out = []
-    if cfg.get('webhook') or (cfg.get('slack_channel') and secret('slack-bot.key')):
+    bot = secret('slack-bot.key')
+    if cfg.get('webhook') or cfg.get('urgent_webhook') or (bot and (cfg.get('slack_channel') or cfg.get('urgent_channel'))):
         out.append('slack')
     if (cfg.get('telegram') or {}).get('chat_id') and secret('telegram.key'):
         out.append('telegram')
     return out
 
 
-def send(cfg, title, body, only=None, say=None):
+def send(cfg, title, body, only=None, say=None, urgent=False):
     # Send to every channel that is set up (or just `only`).  One failing
     # channel doesn't stop the others; failures are reported, not raised.
+    # urgent: to the urgent Slack channel when there is one, so what needs
+    # a decision now isn't lost among the reports.
     cfg = cfg or {}
     failed = {}
     for ch in [only] if only else channels(cfg):
         try:
             if ch == 'slack':
-                if cfg.get('slack_channel') and secret('slack-bot.key'):
-                    from . import slackbot
-                    slackbot.post(secret('slack-bot.key'), cfg['slack_channel'],
-                                  '*%s*\n%s' % (title, chat(body or '')) if body else title)
+                bot = secret('slack-bot.key')
+                if urgent and bot and cfg.get('urgent_channel'):
+                    where, hook = cfg['urgent_channel'], None
+                elif urgent and cfg.get('urgent_webhook'):
+                    where, hook = None, cfg['urgent_webhook']
                 else:
-                    webhook(cfg['webhook'], title, body)
+                    where, hook = (bot and cfg.get('slack_channel')) or None, cfg.get('webhook')
+                if not (where or hook):
+                    continue                # Slack only has the urgent channel
+                if where:
+                    from . import slackbot
+                    slackbot.post(bot, where, '*%s*\n%s' % (title, chat(body or '')) if body else title)
+                else:
+                    webhook(hook, title, body)
             elif ch == 'telegram':
                 from . import telegram
                 # Telegram shows *bold* as asterisks: drop the marks the

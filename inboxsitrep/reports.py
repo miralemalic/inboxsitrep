@@ -25,7 +25,7 @@ NAMES = {'google': 'Gmail', 'microsoft': 'Microsoft', 'other': 'other'}
 
 
 def pct(n, d):
-    return '%.1f%%' % (100.0 * n / d) if d else '–'
+    return '%.1f%%' % (100.0 * n / d) if d > 0 else '-'
 
 
 def load(fleet):
@@ -175,51 +175,64 @@ def names(rows, state, most=2):
 
 
 def daily(cfg, today_live=None, now=None):
-    # (title, text) for every workspace.  today_live(fleet cfg) -> PlusVibe's
-    # numbers for today, or None.  The title is what a phone shows: it names
-    # the workspaces that need you.
+    # The end-of-day SITREP, every workspace in one message, once the day's
+    # sending is done: what needs a decision, then the numbers.  A workspace
+    # with no campaign running is quiet, not a problem: one line at the end.
+    # today_live(fleet cfg) -> today's counts from the sequencer ({'sent',
+    # 'replies', 'positives', 'bounces'}), or None for the last day collected.
     now = now or datetime.datetime.now()
     today = now.date()
-    rows, extras = [], []
+    rows, quiet, leads, extras = [], [], [], []
     total_new = 0
-    # Many workspaces: amber ones get a line each, only red ones a block.
-    compact = len(cfg['fleets']) > 4
     for f in cfg['fleets']:
         try:
             data, found = load(f)
         except (OSError, ValueError):
             continue
-        if not data.days:
-            continue
         name = f['name']
-        fresh = set(store.get_meta(f['db'], 'fresh_ids', []) or [])
-        quiet = (today - datetime.date.fromisoformat(data.days[-1])).days
-        live = None
-        if today_live and quiet <= 3:
+        if not data.days:
+            quiet.append((name, 0))
+            continue
+        # Leads are a line of their own, not a decision.
+        found = [i for i in found if i['kind'] != 'runway']
+        gap = (today - datetime.date.fromisoformat(data.days[-1])).days
+        t = None
+        if today_live:
             try:
-                live = today_live(f)
+                t = today_live(f)
             except (OSError, RuntimeError, ValueError):
-                live = None
-        # Today so far only once it means something; sending to the US from
-        # Europe, a morning report would otherwise show an empty day.
-        if live and live['sent'] < LIVE_ENOUGH * max(1, from_data(data, data.days[-1:])['sent']):
-            live = None
+                t = None
+        if t is None and gap > 1:
+            # Nothing collected since before yesterday: nothing sent since.
+            t = {'sent': 0, 'replies': 0, 'positives': 0, 'bounces': 0}
+        elif t is None:
+            got = [sum(data.fleet(p, data.days[-1:])[k] for p in ('google', 'microsoft', 'apple', 'other'))
+                   for k in range(5)]
+            t = {'sent': got[SENT], 'replies': got[REPLIES], 'positives': got[POSITIVES], 'bounces': got[BOUNCES]}
+            t['day'] = data.days[-1]
+        running = [c for c in data.campaigns.values() if c.get('status') == 'ACTIVE' and not c.get('idle')]
+        fresh = set(store.get_meta(f['db'], 'fresh_ids', []) or [])
         new, old = decisions(data, found, name, fresh, today)
+        if not t['sent'] and not running and gap > 1:
+            quiet.append((name, len(new) + len(old)))
+            continue
         total_new += len(new)
         items = ['NEW ' + x for x in new] + old
-        state = 'RED' if quiet > 3 else status(found)
-        if quiet > 3:
-            nums = 'Nothing sent for %d days.' % quiet
-        elif live:
-            nums = 'Today so far: ' + numbers(from_live(live), short=True)
-        else:
-            nums = '%s: %s' % (day_name(data.days[-1], today), numbers(from_data(data, data.days[-1:]), short=True))
-        top = items[:3 if compact else 4]
-        lines = ['*%s* · %s' % (name, state), nums] + ['• ' + x for x in top]
-        if len(items) > len(top):
-            lines.append('• +%d more in the app' % (len(items) - len(top)))
-        first = short(items[0].split('  → ')[0], 90) if items else 'nothing sent for %d days' % quiet
-        rows.append((RANK[state], name, state, lines, first, len(items)))
+        if not t['sent'] and running:
+            items.insert(0, 'Nothing sent today with %d campaign%s running  -> check the campaigns and mailboxes'
+                         % (len(running), '' if len(running) == 1 else 's'))
+        state = status(found) if items else 'GREEN'
+        if state == 'GREEN' and items:
+            state = 'AMBER'
+        acc = [a for a in data.accounts.values()]
+        down = sum(a.get('down', 0) for a in acc)
+        boxes = sum(a.get('down', 0) + a.get('active', 0) for a in acc)
+        rows.append({'name': name, 'state': state, 'items': items, 't': t, 'down': down, 'boxes': boxes})
+        left = runway_days(data)
+        if left and left[2] < LEADS_DAYS:
+            leads.append('%s: %s days of new leads left in running campaigns (%s left, %s a day).'
+                         % (name, '%.1f' % left[2] if left[2] < 10 else '%.0f' % left[2],
+                            format(left[0], ','), format(round(left[1]), ',')))
         r = checks.reserve(data, found, data.days[-1])
         if r and r['buy'] and (r['weeks'] is None or r['weeks'] < 4):
             extras.append('%s, reserve: %s' % (name, spares(r)))
@@ -228,93 +241,228 @@ def daily(cfg, today_live=None, now=None):
         if broken:
             extras.append('%s, copy: %d active campaign%s with broken sentences (%s).'
                           % (name, len(broken), 's' if len(broken) > 1 else '', ', '.join(broken[:3])))
-    if not rows:
+    if not rows and not quiet:
         return None, None
-    rows.sort(key=lambda r: r[0])
-    marks = ['%s: %s' % (st, names(rows, st)) for st in ('RED', 'AMBER') if any(r[2] == st for r in rows)]
-    title = 'SITREP · %s, %s · %s' % (day(now), now.strftime('%H:%M'), ' · '.join(marks) or 'all clear')
-    count = collections.Counter(r[2] for r in rows)
-    text = ['%d workspace%s: %s.%s' % (len(rows), '' if len(rows) == 1 else 's',
-                                       ', '.join('%d %s' % (count[st], st) for st in ('RED', 'AMBER', 'GREEN') if count[st]),
-                                       '  %d new since the last report.' % total_new if total_new else '')]
-    for rank, name, state, lines, first, n in rows:
-        if state == 'GREEN':
-            continue
-        if compact and state == 'AMBER':
-            continue
-        text += [''] + lines
-    if compact and count['AMBER']:
-        text += ['', '*AMBER*'] + ['• %s: %s%s' % (r[1], r[4], ' (+%d more)' % (r[5] - 1) if r[5] > 1 else '')
-                                   for r in rows if r[2] == 'AMBER']
-    if count['GREEN']:
-        text += ['', 'GREEN, nothing needs you: %s.' % ', '.join(r[1] for r in rows if r[2] == 'GREEN')]
+    rows.sort(key=lambda r: (RANK[r['state']], r['name'].lower()))
+    marks = ['%s: %s' % (st, ', '.join(r['name'] for r in rows if r['state'] == st)[:60])
+             for st in ('RED', 'AMBER') if any(r['state'] == st for r in rows)]
+    title = 'SITREP | %s | %s' % (day(now), ' | '.join(marks) or 'all clear')
+    need = [r for r in rows if r['state'] != 'GREEN']
+    text = ['%d sending | %d need a decision | %d quiet%s' % (
+        len(rows), len(need), len(quiet), ' | %d new since the last report' % total_new if total_new else '')]
+    if need:
+        text += ['', '*DECISIONS*']
+        for r in need:
+            top = r['items'][:PER_WORKSPACE_DAILY]
+            text += ['- %s  *%s*: %s' % (r['state'], r['name'], top[0])] + ['  %s' % x for x in top[1:]]
+            if len(r['items']) > len(top):
+                text.append('  +%d more in the app' % (len(r['items']) - len(top)))
+    if rows:
+        old = [r['t']['day'] for r in rows if r['t'].get('day')]
+        mixed = old and len(old) < len(rows)
+        when = ('today; (*) the last day collected' if mixed else
+                day_name(max(old), today) if old else 'today')
+        text += ['', '*NUMBERS*, %s' % when, '```', table(rows, mark=mixed), '```']
+    if leads:
+        text += ['', '*LEADS*'] + ['- ' + x for x in leads]
     if extras:
-        text += ['', '*Also*'] + ['• ' + e for e in extras]
+        text += ['', '*ALSO*'] + ['- ' + e for e in extras]
+    if quiet:
+        named = ', '.join('%s%s' % (n, ' (%d open)' % k if k else '') for n, k in quiet)
+        text += ['', '*QUIET*, nothing running: %s.' % named]
     return title, dates('\n'.join(text))
 
 
+PER_WORKSPACE_DAILY = 3     # decision lines per workspace in the daily; the rest are in the app
+LEADS_DAYS = 3              # a leads line when a workspace has fewer days of new leads than this
+
+
+def table(rows, mark=False):
+    # The numbers per workspace, in columns a phone keeps lined up.  mark:
+    # star the rows that are the last day collected rather than today.
+    body = []
+    for r in rows:
+        t = r['t']
+        name = (r['name'] if len(r['name']) <= 17 else r['name'][:16] + '.') + ('*' if mark and t.get('day') else '')
+        body.append([name, format(t['sent'], ','), pct(t['replies'], t['sent'] - t['bounces']),
+                     format(t['positives'], ','), pct(t['bounces'], t['sent']),
+                     '%s/%s' % (format(r['down'], ','), format(r['boxes'], ',')) if r['boxes'] else '-'])
+    return columns(['', 'sent', 'repl', 'pos', 'bnc', 'mbx down'], body)
+
+
+def columns(head, body):
+    # Left for the name, right for the numbers, each as wide as it needs.
+    width = [max(len(str(x[i])) for x in [head] + body) for i in range(len(head))]
+    line = lambda x: '  '.join(str(v).ljust(width[i]) if i == 0 else str(v).rjust(width[i]) for i, v in enumerate(x))
+    return '\n'.join(line(x).rstrip() for x in [head] + body)
+
+
+def runway_days(data):
+    # (leads left, new leads a day, days) in campaigns still taking new
+    # leads, or None while the pace isn't known.
+    if not data.days:
+        return None
+    left, pace = checks.leads_left(data, data.days[-1])
+    if not left or pace <= 0:
+        return None
+    total = sum(left.values())
+    return total, pace, total / pace
+
+
+def today_counts(f):
+    # Today so far, straight from the sequencer: what was sent, and the
+    # replies, positives and bounces that came in.  PlusVibe and EmailBison.
+    from . import watch
+    seq = f.get('sequencer')
+    if seq == 'emailbison':
+        from . import emailbison
+        return emailbison.today(watch.client(f))
+    if seq == 'plusvibe':
+        d = datetime.date.today().isoformat()
+        h = watch.client(f).get('/account/email-stats', start_date=d, end_date=d).get('header') or {}
+        return {'sent': h.get('total_sent_count') or 0, 'replies': h.get('total_reply_count') or 0,
+                'positives': h.get('total_pos_reply_count') or 0,
+                'bounces': h.get('total_bounce_count') or
+                (h.get('sender_bounce_count') or 0) + (h.get('recipient_bounce_count') or 0)}
+    return None
+
+
 def weekly(cfg, now=None):
-    # The week to today, for every workspace.  Saturday morning by default:
-    # US sending on Friday ends after midnight in Europe.
+    # The week to today, every workspace in one message: the numbers against
+    # the same days last week, what the domains need, the campaigns to scale
+    # or stop, the changes made.  Saturday afternoon by default, once
+    # Friday's US sending is done.
     from .actions import history
     now = now or datetime.datetime.now()
     today = now.date()
     start = today - datetime.timedelta(days=today.weekday())         # Monday
     prev = start - datetime.timedelta(days=7)
-    parts, lines = [], []
+    rows, doms, camps, made, quiet = [], [], [], [], []
     for f in cfg['fleets']:
         try:
             data, found = load(f)
         except (OSError, ValueError):
             continue
+        name = f['name']
         week = [d for d in data.days if start.isoformat() <= d <= today.isoformat()]
         # the same weekdays of last week, so a Friday compares five days to five
         before = [d for d in data.days if prev.isoformat() <= d <= (today - datetime.timedelta(days=7)).isoformat()]
         if not week:
-            parts.append('*%s*\nNothing sent this week.' % f['name'])
+            quiet.append(name)
             continue
-        t, b = from_data(data, week), from_data(data, before)
-        change = ''
-        if b['sent']:
-            change = ' (%+d%% on the same days last week)' % round(100 * (t['sent'] - b['sent']) / b['sent'])
-        state = status(found)
-        block = ['*%s*  %s' % (f['name'], state), 'Week: %s' % numbers(t, change)]
-        mix = infra(data, week)
-        if mix:
-            block.append(mix.replace(', 7 days', ''))
+        got = [sum(data.fleet(p, week)[k] for p in ('google', 'microsoft', 'apple', 'other')) for k in range(5)]
+        was = sum(data.fleet(p, before)[SENT] for p in ('google', 'microsoft', 'apple', 'other'))
+        acc = list(data.accounts.values())
+        rows.append({'name': name, 'state': status(found),
+                     't': {'sent': got[SENT], 'replies': got[REPLIES], 'positives': got[POSITIVES],
+                           'bounces': got[BOUNCES], 'was': was},
+                     'down': sum(a.get('down', 0) for a in acc),
+                     'boxes': sum(a.get('down', 0) + a.get('active', 0) for a in acc)})
         last14 = [d for d in data.days if d >= (today - datetime.timedelta(days=13)).isoformat()]
-        v = verdicts.domains(data, last14)
-        count = collections.Counter(r['verdict'] for r in v.values())
+        count = collections.Counter(r['verdict'] for r in verdicts.domains(data, last14).values())
         stop = count['burned'] + count['account_blocked']
         fix = sum(count[k] for k in ('gmail_blocked', 'microsoft_blocked', 'fix_auth', 'bad_list', 'mixed',
                                      'copy', 'refused', 'underperforming'))
         delist = count['listed'] + count['listed_low']
-        block.append('Domains, 14 days: %d to stop, %d to fix, %d to delist, %d healthy%s' % (
-            stop, fix, delist, count['healthy'] + count['strong'],
-            '; %d with sends but no reply or bounce data, to check' % count['silent'] if count['silent'] else ''))
-        camps = [c for c in verdicts.campaigns(data) if c['status'] == 'ACTIVE']
-        win = [c['name'] for c in camps if c['verdict'] == 'winner']
-        lose = [c['name'] for c in camps if c['verdict'] in ('loser', 'bounces_high', 'bad_list')]
-        if win:
-            block.append('Campaigns to scale: %s' % ', '.join(win[:3]) + (' and %d more' % (len(win) - 3) if len(win) > 3 else ''))
-        if lose:
-            block.append('Campaigns to stop or fix: %s' % ', '.join(lose[:3]) + (' and %d more' % (len(lose) - 3) if len(lose) > 3 else ''))
+        if stop or fix or delist:
+            doms.append((name, stop, fix, delist, count['healthy'] + count['strong']))
+        running = [c for c in verdicts.campaigns(data) if c['status'] == 'ACTIVE']
+        win = [c['name'] for c in running if c['verdict'] == 'winner']
+        lose = [c['name'] for c in running if c['verdict'] in ('loser', 'bounces_high', 'bad_list')]
+        if win or lose:
+            camps.append('%s: %s' % (name, '; '.join(x for x in (
+                'scale %s' % ', '.join(win[:3]) + (' +%d' % (len(win) - 3) if len(win) > 3 else '') if win else '',
+                'stop or fix %s' % ', '.join(lose[:3]) + (' +%d' % (len(lose) - 3) if len(lose) > 3 else '') if lose else '')
+                if x)))
+        done = [h for h in history(f['db']) if start.isoformat() <= h['at'][:10] <= today.isoformat()]
+        if done:
+            made.append('%s: %s' % (name, '; '.join('%s (%s)' % (h['title'].rstrip('.'), h['status']) for h in done[:3])
+                                    + (' +%d' % (len(done) - 3) if len(done) > 3 else '')))
+    if not rows and not quiet:
+        return None, None
+    rows.sort(key=lambda r: -r['t']['sent'])
+    sent = sum(r['t']['sent'] for r in rows)
+    was = sum(r['t']['was'] for r in rows)
+    pos = sum(r['t']['positives'] for r in rows)
+    title = 'SITREP | WEEKLY | week to %s | %s sent, %s positive' % (day(now), format(sent, ','), format(pos, ','))
+    text = ['%d sending | %d quiet | %s sent%s | %s positive' % (
+        len(rows), len(quiet), format(sent, ','),
+        ' (%+d%% on the same days last week)' % round(100 * (sent - was) / was) if was else '', format(pos, ','))]
+    if rows:
+        body = []
+        for r in rows:
+            t = r['t']
+            body.append([r['name'] if len(r['name']) <= 17 else r['name'][:16] + '.', format(t['sent'], ','),
+                         '%+d%%' % round(100 * (t['sent'] - t['was']) / t['was']) if t['was'] else '-',
+                         pct(t['replies'], t['sent'] - t['bounces']), format(t['positives'], ','),
+                         pct(t['bounces'], t['sent'])])
+        text += ['', '*NUMBERS*, Monday to today', '```',
+                 columns(['', 'sent', 'vs lw', 'repl', 'pos', 'bnc'], body), '```']
+    if doms:
+        body = [[name if len(name) <= 17 else name[:16] + '.', stop, fix, delist, ok]
+                for name, stop, fix, delist, ok in sorted(doms, key=lambda d: (-d[1], -d[2], -d[3]))]
+        text += ['', '*DOMAINS*, 14 days', '```', columns(['', 'stop', 'fix', 'delist', 'healthy'], body), '```']
+    if camps:
+        text += ['', '*CAMPAIGNS*'] + ['- ' + x for x in camps]
+    if made:
+        text += ['', '*CHANGES MADE*'] + ['- ' + x for x in made]
+    if quiet:
+        text += ['', '*QUIET* all week: %s.' % ', '.join(quiet)]
+    text += ['', 'Replies to the last days are still coming in; judge those reply rates next week.']
+    return title, dates('\n'.join(text))
+
+
+def monthly(cfg, now=None):
+    # The last 30 days, every workspace: the numbers, the domains it lost and
+    # what to buy to keep sending, the leads left, the changes made.  On the
+    # 1st by default; Inbox Sitrep keeps about a month of days.
+    from .actions import history
+    now = now or datetime.datetime.now()
+    today = now.date()
+    since = (today - datetime.timedelta(days=30)).isoformat()
+    rows, infra_, leads, quiet, made = [], [], [], [], collections.Counter()
+    for f in cfg['fleets']:
+        try:
+            data, found = load(f)
+        except (OSError, ValueError):
+            continue
+        days = [d for d in data.days if d >= since]
+        if not days:
+            quiet.append(f['name'])
+            continue
+        got = [sum(data.fleet(p, days)[k] for p in ('google', 'microsoft', 'apple', 'other')) for k in range(5)]
+        acc = list(data.accounts.values())
+        rows.append({'name': f['name'], 'state': status(found),
+                     't': {'sent': got[SENT], 'replies': got[REPLIES], 'positives': got[POSITIVES],
+                           'bounces': got[BOUNCES]},
+                     'down': sum(a.get('down', 0) for a in acc),
+                     'boxes': sum(a.get('down', 0) + a.get('active', 0) for a in acc)})
         r = checks.reserve(data, found, data.days[-1])
         if r:
-            block.append('Reserve: %d domains sending, %s' % (r['sending'], spares(r)))
-        made = [h for h in history(f['db']) if start.isoformat() <= h['at'][:10] <= today.isoformat()]
-        if made:
-            block.append('Changes made: %s' % '; '.join('%s (%s)' % (h['title'].rstrip('.'), h['status']) for h in made[:4]))
-        new, old = decisions(data, found, f['name'], (), today)
-        block.append('Open decisions: %d (the daily SITREP lists them)' % (len(new) + len(old)))
-        parts.append('\n'.join(block))
-        lines.append('%s %s: %s sent, %s positive%s' % (
-            f['name'], state, format(t['sent'], ','), format(t['positives'], ','),
-            ', %d to scale' % len(win) if win else ''))
-    if not parts:
+            infra_.append('%s: %d sending, %s' % (f['name'], r['sending'], spares(r)))
+        left = runway_days(data)
+        if left:
+            leads.append('%s: %s days of new leads in running campaigns (%s left).'
+                         % (f['name'], '%.0f' % left[2], format(left[0], ',')))
+        for h in history(f['db']):
+            if h['at'][:10] >= since:
+                made[f['name']] += 1
+    if not rows:
         return None, None
-    shown = [f['name'] for f in cfg['fleets']]
-    title = 'Weekly SITREP · week to %s · %s' % (day(now), ', '.join(shown[:3]) + (' +%d' % (len(shown) - 3) if len(shown) > 3 else ''))
-    text = '\n'.join(['*Bottom line*'] + ['• ' + l for l in lines] + [
-        'Replies to the last days are still coming in; judge those reply rates next week.', '']) + '\n' + '\n\n'.join(parts)
-    return title, dates(text)
+    rows.sort(key=lambda r: -r['t']['sent'])
+    sent = sum(r['t']['sent'] for r in rows)
+    pos = sum(r['t']['positives'] for r in rows)
+    title = 'SITREP | MONTHLY | 30 days to %s' % day(now)
+    text = ['%s sent | %s positive | %.1f per 1,000 | %d workspaces sending' % (
+        format(sent, ','), format(pos, ','), 1000.0 * pos / sent if sent else 0, len(rows)),
+        '', '*NUMBERS*, 30 days', '```', table(rows), '```']
+    if infra_:
+        text += ['', '*INFRASTRUCTURE*'] + ['- ' + x for x in infra_]
+    if leads:
+        text += ['', '*LEADS*'] + ['- ' + x for x in leads]
+    if made:
+        text += ['', '*CHANGES MADE*: %s.' % ', '.join('%s %d' % kv for kv in made.most_common())]
+    if quiet:
+        text += ['', '*QUIET* all month: %s.' % ', '.join(quiet)]
+    return title, dates('\n'.join(text))
+

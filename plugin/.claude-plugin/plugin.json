@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "inboxsitrep",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Cold email deliverability analyst: reads your PlusVibe, Instantly or EmailBison fleet through Inbox Sitrep, finds what is breaking (Gmail blocks, blocklists, tenant blocks, quiet spam folders, leads running out) and proposes fixes you approve one at a time.",
   "author": {
     "name": "miralemalic"

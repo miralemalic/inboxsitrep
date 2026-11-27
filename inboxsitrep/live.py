@@ -154,11 +154,12 @@ def alerts(path, hours=WINDOW_HOURS, at=None):
 
 def words(detail, hits, hours):
     names = ', '.join(d for d, _ in hits[:3]) + (' and %d more' % (len(hits) - 3) if len(hits) > 3 else '')
+    # What happened, the evidence, and what to do: short enough for a phone.
     if detail == 'mailbox_error':
         return ('%d mailbox errors on %d domains' % (sum(n for _, n in hits), len(hits)),
-                '%s.  Reconnect them in the sequencer.' % names)
+                '%s.\nACTION: reconnect them in the sequencer.' % names)
     return (ALERTS[detail][1].format(dom=names),
-            '%d bounces in the last %d hours.  %s' % (sum(n for _, n in hits), hours, ALERTS[detail][2]))
+            '%d bounces in the last %d hours.\nACTION: %s' % (sum(n for _, n in hits), hours, ALERTS[detail][2]))
 
 
 def poll(client, path, since, say=print):
@@ -215,7 +216,7 @@ def cycle(client, path, notify=None, say=print, reader=None):
         sent_today += 1
         seen.add('sent:%s:%d' % (day, sent_today))
         if sent_today == ALERTS_A_DAY:
-            body += '.  Further alerts today wait for the report.'
+            body += '\nThe last alert today for this workspace; the rest wait for the report.'
         fired.append({'title': title, 'body': body})
         say('ALERT %s (%s)' % (title, body))
         if notify:

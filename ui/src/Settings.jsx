@@ -11,9 +11,10 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
   const n = s.notify || {}
   const [form, setForm] = useState({
     every_hours: s.every_hours, analyst: s.analyst, model: s.model, between: s.between || 'urgent',
-    weekly: s.weekly || { day: null, at: '08:00' },
+    weekly: s.weekly || { day: null, at: '17:00' }, monthly: s.monthly || { day: null, at: '17:00' },
     alerts: s.alerts !== false, report_at: (s.report_at || []).join(', '), autostart: !!s.autostart,
     desktop: n.desktop !== false, webhook: n.webhook || '', slack_channel: n.slack_channel || '',
+    urgent_webhook: n.urgent_webhook || '', urgent_channel: n.urgent_channel || '',
     telegram_token: '', slack_bot: '', slack_app: '',
   })
   const [saved, setSaved] = useState(form)
@@ -37,9 +38,9 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
     return post('/api/app/test-workspace', { fleet: name }).then(r => setNote(r.error ? 'Test failed: ' + r.error : r.ok))
   }
 
-  function test(channel) {
+  function test(channel, urgent) {
     setNote('Sending a test to ' + channel + '.')
-    save({}).then(() => post('/api/app/test-notify', { channel }).then(r =>
+    save({}).then(() => post('/api/app/test-notify', { channel, urgent: !!urgent }).then(r =>
       setNote(r.error ? 'Test failed: ' + r.error : 'Test sent to ' + channel + '. Check that it arrived.')))
   }
 
@@ -89,9 +90,9 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
       <section className="sec">
         <header><h2>Reports</h2><span className="r">sent to Slack and Telegram (set up below)</span></header>
         <div className="body form">
-          <label>Daily SITREP at</label>
-          <input value={form.report_at} placeholder="e.g. 08:00, 17:00" onChange={e => set('report_at', e.target.value)} />
-          <span /><p className="faint small">One message covering every workspace: each one RED, AMBER or GREEN with its worst problem, yesterday's numbers and the decisions to make. Uses this computer's clock. Sending to the US from Europe? 08:00 covers the full US day.</p>
+          <label>End-of-day SITREP at</label>
+          <input value={form.report_at} placeholder="e.g. 23:30" onChange={e => set('report_at', e.target.value)} />
+          <span /><p className="faint small">One message covering every workspace, once the day's sending is done: the decisions to make, then today's numbers per workspace, leads running low in running campaigns, and the workspaces with nothing running on one line. Uses this computer's clock; pick a time after your last campaign stops sending.</p>
           <label>Weekly SITREP</label>
           <div style={{ display: 'flex', gap: 8 }}>
             <select value={form.weekly.day == null ? '' : String(form.weekly.day)}
@@ -102,10 +103,21 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
             </select>
             <input style={{ width: 90 }} value={form.weekly.at} onChange={e => set('weekly', { ...form.weekly, at: e.target.value })} />
           </div>
-          <span /><p className="faint small">The week per workspace: domains to stop, fix and delist, campaigns to scale or stop, changes made. Saturday morning covers a full US Friday.</p>
-          <span /><div style={{ display: 'flex', gap: 8 }}>
-            <button className="line" onClick={() => post('/api/app/send-report', { kind: 'daily' }).then(r => setNote(r.error || 'Daily SITREP sent.'))}>Send the daily SITREP now</button>
+          <span /><p className="faint small">The week per workspace against the same days last week, the domains to stop, fix and delist, campaigns to scale or stop, changes made. Saturday afternoon covers a full US Friday.</p>
+          <label>Monthly SITREP</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <select value={form.monthly.day == null ? '' : String(form.monthly.day)}
+                    onChange={e => set('monthly', { ...form.monthly, day: e.target.value === '' ? null : Number(e.target.value) })}>
+              <option value="">Off</option>
+              {Array.from({ length: 28 }, (_, i) => <option key={i} value={String(i + 1)}>{'Day ' + (i + 1)}</option>)}
+            </select>
+            <input style={{ width: 90 }} value={form.monthly.at} onChange={e => set('monthly', { ...form.monthly, at: e.target.value })} />
+          </div>
+          <span /><p className="faint small">The last 30 days: the numbers per workspace, domains lost and how many to buy, leads left, changes made.</p>
+          <span /><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className="line" onClick={() => post('/api/app/send-report', { kind: 'daily' }).then(r => setNote(r.error || 'End-of-day SITREP sent.'))}>Send the end-of-day now</button>
             <button className="line" onClick={() => post('/api/app/send-report', { kind: 'weekly' }).then(r => setNote(r.error || 'Weekly SITREP sent.'))}>Send the weekly now</button>
+            <button className="line" onClick={() => post('/api/app/send-report', { kind: 'monthly' }).then(r => setNote(r.error || 'Monthly SITREP sent.'))}>Send the monthly now</button>
           </div>
           <label>Between reports</label>
           <select value={form.alerts ? form.between : 'off'}
@@ -114,7 +126,7 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
             <option value="new">Urgent alerts, and each new problem as it is found</option>
             <option value="off">Nothing; the reports only</option>
           </select>
-          <span /><p className="faint small">Urgent: what stops mail at scale. A Microsoft tenant block, Gmail or Microsoft starting to refuse a domain, failing authentication. Bounces are read every 15 minutes; each domain alerts once a day, at most three alerts a day per workspace. Blocklists go in the reports. PlusVibe and EmailBison workspaces.</p>
+          <span /><p className="faint small">Urgent: what needs a decision now. A Microsoft tenant block, Gmail or Microsoft starting to refuse a domain, failing authentication; on EmailBison also 5 or more mailboxes disconnecting, a workspace that stops sending inside its campaigns' hours, and bounces running 3 times the usual rate. Checked every 15 minutes; everything one check finds, every workspace, comes as one message to the urgent channel, each problem once a day. New problems go to the report channel. Blocklists wait for the reports.</p>
         </div>
       </section>
 
@@ -139,11 +151,19 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
                  onChange={e => set('slack_app', e.target.value)} />
           <label>Report channel</label>
           <input value={form.slack_channel} placeholder="#deliverability" onChange={e => set('slack_channel', e.target.value)} />
-          <span /><div><button className="line" disabled={!form.slack_channel && !form.webhook} onClick={() => test('slack')}>Send a test</button></div>
+          <label>Urgent channel</label>
+          <input value={form.urgent_channel} placeholder="#deliverability-urgent" onChange={e => set('urgent_channel', e.target.value)} />
+          <span /><p className="faint small">Urgent problems only, for every workspace. Left empty, they go to the report channel.</p>
+          <span /><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className="line" disabled={!form.slack_channel && !form.webhook} onClick={() => test('slack')}>Send a test</button>
+            <button className="line" disabled={!form.urgent_channel && !form.urgent_webhook} onClick={() => test('slack', true)}>Send a test to the urgent channel</button>
+          </div>
           <span /><details className="faint small"><summary>Reports only, without the app: an incoming webhook</summary>
-            <input style={{ marginTop: 8, width: '100%' }} value={form.webhook} placeholder="https://hooks.slack.com/services/..."
+            <input style={{ marginTop: 8, width: '100%' }} value={form.webhook} placeholder="Reports: https://hooks.slack.com/services/..."
                    onChange={e => set('webhook', e.target.value)} />
-            <p>Used when no report channel is set. A webhook can post but cannot answer questions.</p>
+            <input style={{ marginTop: 8, width: '100%' }} value={form.urgent_webhook} placeholder="Urgent: https://hooks.slack.com/services/..."
+                   onChange={e => set('urgent_webhook', e.target.value)} />
+            <p>Used when no channel is set. A webhook posts to the one channel it was made for, so the urgent one needs its own; it can post but cannot answer questions.</p>
           </details>
         </div>
       </section>
