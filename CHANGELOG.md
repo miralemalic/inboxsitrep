@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.2.0 (2026-11-27)
+
+Reports for an agency with twenty workspaces: fewer messages, each one
+shorter, and what can't wait in a channel of its own.
+
+- **End-of-day SITREP** at the time you pick (23:30 to start with), once the
+  day's sending is done, in place of the morning and afternoon ones: the
+  decisions, worst first, then today's numbers per workspace in columns
+  (sent, replies, positives, bounces, mailboxes down), straight from the
+  sequencer.  A workspace with nothing running is quiet, not RED: one line at
+  the end.
+- **Weekly SITREP** on Saturday at 17:00, after Friday's US sending: the week
+  against the same days last week and what the domains need, in two tables,
+  then the campaigns to scale or stop and the changes made.
+- **Monthly SITREP**, new, on the 1st: the last 30 days per workspace, the
+  domains lost and how many to buy, the leads left, the changes made.
+- **Urgent to a channel of its own** (a Slack channel or webhook): everything
+  one 15-minute check finds, every workspace, in one message, each problem
+  once a day, the action last.  New on EmailBison: 5 or more mailboxes
+  disconnecting, a workspace that stops sending inside its campaigns' hours,
+  and bounces at 3 times the usual rate on at least 200 sends in an hour.
+- **Leads left counts only campaigns still taking new leads.**  Paused, done
+  and draft campaigns are left out, and so is one that is active but has
+  started nobody new in two days: their leads aren't going anywhere.  On
+  EmailBison the pace is what the campaigns took between checks; a line in
+  the end-of-day report under three days, never an urgent alert.
+- EmailBison campaigns get the campaign verdicts in the weekly, and a domain
+  no campaign sent from in a month counts as a warmed spare for the reserve.
+- The dashboard leaves out a workspace that hasn't sent anything yet; its
+  pages failed before.
+- Reports and alerts in fewer words: a status line, the decisions, the
+  numbers, then what to do.
+
 ## 1.1.0 (2026-11-27)
 
 - **EmailBison, run on live workspaces.** Read-only checks on nineteen

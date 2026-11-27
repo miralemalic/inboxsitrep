@@ -669,7 +669,8 @@ def app_post(app, what, body):
         # The daily or weekly SITREP now, from the last checks, to see it.
         if not notify.channels(app['settings'].cfg.get('notify') or {}):
             raise ValueError('connect Slack or Telegram first')
-        app['checker'].digest(app['settings'].cfg, 'weekly' if body.get('kind') == 'weekly' else 'now')
+        kind = body.get('kind')
+        app['checker'].digest(app['settings'].cfg, kind if kind in ('weekly', 'monthly') else 'now')
         return {'ok': True}
     if what == 'test-workspace':
         from . import watch
@@ -682,7 +683,9 @@ def app_post(app, what, body):
         cfg = app['settings'].cfg.get('notify') or {}
         if ch not in notify.channels(cfg):
             raise ValueError('%s is not set up yet; save the settings first' % (ch or 'that channel'))
-        failed = notify.send(cfg, 'Inbox Sitrep test', 'This is a test.  Reports will arrive here.', only=ch)
+        urgent = bool(body.get('urgent'))
+        failed = notify.send(cfg, 'Inbox Sitrep test', 'This is a test.  %s will arrive here.'
+                             % ('Urgent problems' if urgent else 'Reports'), only=ch, urgent=urgent)
         if failed:
             raise ValueError('%s: %s' % (ch, failed[ch]))
         return {'ok': True}

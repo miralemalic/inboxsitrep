@@ -29,7 +29,8 @@ DATA = os.path.expanduser('~/.local/share/inboxsitrep')
 QUICK = 15         # minutes between quick sweeps for urgent bounces
 DEFAULTS = {'fleets': [], 'every_hours': 6, 'alerts': True, 'analyst': True, 'model': 'sonnet',
             'notify': {'desktop': True, 'webhook': ''}, 'between': 'urgent',
-            'report_at': ['08:00', '17:00'], 'weekly': {'day': 5, 'at': '08:00'}}
+            'report_at': ['23:30'], 'weekly': {'day': 5, 'at': '17:00'},
+            'monthly': {'day': 1, 'at': '17:00'}}
 LATE = 3           # hours after a report time that the report still goes out
 SEQUENCERS = ('plusvibe', 'instantly', 'emailbison', 'smartlead', 'sim')
 
@@ -103,16 +104,29 @@ class Settings:
                 raise ValueError('the weekly report day is Monday to Sunday')
             at = report_times(w.get('at') or '17:00')
             body = dict(body, weekly={'day': day, 'at': at[0] if at else '17:00'})
+        if 'monthly' in body:
+            m = body['monthly'] or {}
+            day = m.get('day')
+            if day is not None and day not in range(1, 29):
+                raise ValueError('the monthly report goes out on day 1 to 28 of the month')
+            at = report_times(m.get('at') or '17:00')
+            body = dict(body, monthly={'day': day, 'at': at[0] if at else '17:00'})
         with self.lock:
             if times is not None:
                 self.cfg['report_at'] = times
-            for k in ('every_hours', 'analyst', 'model', 'between', 'alerts', 'weekly'):
+            for k in ('every_hours', 'analyst', 'model', 'between', 'alerts', 'weekly', 'monthly'):
                 if k in body:
                     self.cfg[k] = body[k]
             if 'webhook' in body:
                 self.cfg['notify']['webhook'] = body['webhook'].strip()
             if 'slack_channel' in body:
                 self.cfg['notify']['slack_channel'] = body['slack_channel'].strip()
+            # Urgent problems to a channel of their own, so they aren't lost
+            # among the reports.
+            if 'urgent_webhook' in body:
+                self.cfg['notify']['urgent_webhook'] = body['urgent_webhook'].strip()
+            if 'urgent_channel' in body:
+                self.cfg['notify']['urgent_channel'] = body['urgent_channel'].strip()
             for field, name in (('slack_bot', 'slack-bot.key'), ('slack_app', 'slack-app.key')):
                 if body.get(field):
                     self.keep(name, body[field])
@@ -321,6 +335,14 @@ class Checker(threading.Thread):
         # night.
         now = now or datetime.datetime.now()
         lead = self.lead(cfg)
+        m = cfg.get('monthly') or {}
+        if m.get('day') and m.get('at'):
+            for day in (now.date(), now.date() + datetime.timedelta(days=1)):
+                if day.day == int(m['day']):
+                    at = datetime.datetime.combine(day, datetime.time.fromisoformat(m['at']))
+                    if at - lead <= now < at + datetime.timedelta(hours=LATE) \
+                            and self.reported.get('monthly') != day.isoformat():
+                        return 'monthly', day.isoformat()
         w = cfg.get('weekly') or {}
         if w.get('day') is not None and w.get('at'):
             for day in (now.date(), now.date() + datetime.timedelta(days=1)):
@@ -353,6 +375,12 @@ class Checker(threading.Thread):
             while at <= now or at.weekday() != int(w['day']):
                 at += datetime.timedelta(days=1)
             waits.append((at - now).total_seconds())
+        m = cfg.get('monthly') or {}
+        if m.get('day') and m.get('at'):
+            at = datetime.datetime.combine(now.date(), datetime.time.fromisoformat(m['at'])) - lead
+            while at <= now or (at + lead).day != int(m['day']):
+                at += datetime.timedelta(days=1)
+            waits.append((at - now).total_seconds())
         return min(waits) if waits else None
 
     def run(self):
@@ -369,14 +397,13 @@ class Checker(threading.Thread):
         # One pass: what is due, checked one workspace at a time, then the report.
         cfg = self.settings.cfg
         forced, self.only = self.only, None
-        due = self.slot(cfg)
-        slot = due and due[0]
-        if due:
-            # Report time: check everything afresh and send the report,
-            # whether or not anything new turned up.
-            forced = '*'
-            self.reported[slot] = due[1]
-            if slot == 'weekly':
+        # Every report due now (the 1st can be a Saturday): one check of
+        # every workspace, then each report.
+        slots, due = [], self.slot(cfg)
+        while due:
+            slots.append(due[0])
+            self.reported[due[0]] = due[1]
+            if due[0] == 'weekly':
                 # the weekly report stands in for a daily one due at the same time
                 at = datetime.time.fromisoformat(cfg['weekly']['at'])
                 for t in cfg.get('report_at') or ():
@@ -384,6 +411,12 @@ class Checker(threading.Thread):
                               - datetime.datetime.combine(datetime.date.today(), at))
                     if gap <= datetime.timedelta(hours=LATE):
                         self.reported[t] = due[1]
+            due = self.slot(cfg)
+        slot = slots[0] if slots else None
+        if slots:
+            # Report time: check everything afresh and send the report,
+            # whether or not anything new turned up.
+            forced = '*'
             try:
                 os.makedirs(DATA, exist_ok=True)
                 with open(self.reported_file, 'w') as f:
@@ -422,8 +455,9 @@ class Checker(threading.Thread):
         stopped = self.halt.is_set()
         self.send_outbox(cfg)
         self.halt.clear()
-        if slot and todo and not stopped:
-            self.digest(cfg, slot)
+        if slots and todo and not stopped:
+            for s in slots:
+                self.digest(cfg, s)
         if forced and not todo:
             self.say('nothing to check')
         if not todo and cfg.get('alerts', True):
@@ -453,8 +487,12 @@ class Checker(threading.Thread):
         # Between full checks: only the bounces since the last look, read
         # in two light requests, for the signatures that can't wait hours
         # (a tenant block, Gmail starting to refuse a domain, a blocklist
-        # naming one).  PlusVibe and EmailBison.
+        # naming one).  PlusVibe and EmailBison; on EmailBison also
+        # mailboxes disconnecting, a workspace that stopped sending inside
+        # its hours, and a bounce spike.  Everything one sweep finds, over
+        # every workspace, goes out as one urgent message.
         from . import live
+        found = []
         for f in cfg['fleets']:
             if f.get('sequencer') not in watch.LIVE or not os.path.exists(f['db']):
                 continue
@@ -462,11 +500,19 @@ class Checker(threading.Thread):
                 continue
             self.swept[f['name']] = time.time()
             try:
-                live.cycle(watch.client(f), f['db'],
-                           notify=lambda t, b, n=f['name']: self.alert(cfg, n, t, b),
+                api = watch.client(f)
+                live.cycle(api, f['db'], notify=lambda t, b, n=f['name']: found.append((n, t, b)),
                            say=lambda m: None, reader=watch.reader(f))
+                if f.get('sequencer') == 'emailbison':
+                    from . import emailbison
+                    state = store.get_meta(f['db'], 'pulse', {}) or {}
+                    for title, body in emailbison.pulse(api, state, store.get_meta(f['db'], 'usual', {})):
+                        found.append((f['name'], title, body))
+                    store.save_meta(f['db'], {'pulse': state})
             except (OSError, RuntimeError, ValueError) as e:
                 self.state['quick_error'] = str(e)[:200]
+        if found:
+            self.urgent(cfg, found)
 
     def send_outbox(self, cfg):
         # What this run found, in one message however many workspaces it
@@ -484,13 +530,15 @@ class Checker(threading.Thread):
         notify.send(n, title, body, say=self.say)
 
     def digest(self, cfg, slot):
-        # The daily SITREP, or on its day the weekly one, for every
+        # The end-of-day SITREP, or the weekly or the monthly one, for every
         # workspace in one message.
         from . import reports
         if slot == 'weekly':
             title, text = reports.weekly(cfg)
+        elif slot == 'monthly':
+            title, text = reports.monthly(cfg)
         else:
-            title, text = reports.daily(cfg, today_live=web.today_numbers)
+            title, text = reports.daily(cfg, today_live=reports.today_counts)
         n = cfg.get('notify') or {}
         if not text or not notify.channels(n):
             return
@@ -500,19 +548,36 @@ class Checker(threading.Thread):
         self.say('sending the %s to %s' % (title, ', '.join(notify.channels(n))))
         notify.send(n, title, text, say=self.say)
 
-    def alert(self, cfg, name, title, body):
-        self.say('ALERT %s: %s' % (name, title))
+    def urgent(self, cfg, found):
+        # [(workspace, title, body)] as one message to the urgent channel:
+        # short, the action last.  Twenty workspaces, one ping.
         n = cfg.get('notify') or {}
+        for name, title, body in found:
+            self.say('URGENT %s: %s' % (name, title))
+        if len(found) == 1:
+            name, title, body = found[0]
+            head, text = 'URGENT | %s | %s' % (name, title), body
+        else:
+            names = sorted({name for name, _, _ in found})
+            head = 'URGENT | %d problems | %s' % (len(found), ', '.join(names[:3]) + (
+                ' +%d' % (len(names) - 3) if len(names) > 3 else ''))
+            text = '\n\n'.join('*%s*: %s\n%s' % item for item in found)
         if n.get('desktop', True):
-            notify.desktop('%s: %s' % (name, title), body)
-        notify.send(n, 'ALERT · %s · %s' % (name, title), body)
+            notify.desktop(head, text.split('\n')[0])
+        notify.send(n, head, text, urgent=True)
 
     def check(self, cfg, f):
         os.makedirs(os.path.dirname(f['db']), exist_ok=True)
         send = notify.sender(dict(cfg['notify'], desktop=cfg['notify'].get('desktop', True)))
         watch.watch_one(cfg, f, send, self.say, report=self.report, outbox=self.outbox)
-        if not any(x.path == f['db'] for x in self.fleets) and os.path.exists(f['db']):
+        if not any(x.path == f['db'] for x in self.fleets) and shown(f['db']):
             self.fleets.append(web.Fleet(f['db']))
+
+
+def shown(db):
+    # On the dashboard once there are days to show: a workspace that hasn't
+    # sent anything yet has nothing to draw, and broke its pages.
+    return os.path.exists(db) and bool(store.load(db).days)
 
 
 def free_port():
@@ -586,7 +651,7 @@ def main(cfg_path=None, check=True, window=True, port=None):
         from .window import open_window
         open_window(there)
         return
-    fleets = [web.Fleet(f['db']) for f in settings.cfg['fleets'] if os.path.exists(f['db'])]
+    fleets = [web.Fleet(f['db']) for f in settings.cfg['fleets'] if shown(f['db'])]
     checker = Checker(settings, fleets)
     token = secrets.token_urlsafe(18)
     port = port or free_port()

@@ -5,7 +5,7 @@ tells you which domains and campaigns have a problem and what to do about it,
 and fixes it from the app once you approve: pause domains, cap sending, turn
 off warmup or tracking, all with an undo. It works with PlusVibe, Instantly
 and EmailBison, runs on your own device, and sends a short report to Slack or
-Telegram every morning.
+Telegram at the end of every day.
 
 It was built, used and tested against 30+ PlusVibe and EmailBison workspaces
 and 225,000+ mailboxes.
@@ -29,8 +29,9 @@ and 225,000+ mailboxes.
 - **Warns before your leads run out,** per campaign and per workspace.
 - **Fixes it in two clicks:** see exactly what will change, approve it, undo it
   any time.
-- **Reports to Slack or Telegram every morning,** and you can ask it questions
-  there.
+- **Reports to Slack or Telegram** at the end of the day, every week and every
+  month, urgent problems to a channel of their own, and you can ask it
+  questions there.
 
 All your workspaces on one page, the ones that need you at the top:
 
@@ -196,23 +197,39 @@ in the simulator. Every threshold and where it comes from is in
 
 ## Reports
 
-One message covers all your workspaces, in Slack or Telegram:
+One message covers all your workspaces, however many, in Slack or Telegram:
 
-- **Daily** at 08:00 and 17:00 by default: each workspace marked RED, AMBER or
-  GREEN with its biggest problem, yesterday's numbers, and what needs a
-  decision. If you're in Europe sending to the US, the 08:00 report has the
-  full US day.
-- **Weekly** on Saturday at 08:00: the week per workspace, domains to stop,
-  fix and delist, campaigns to scale or stop, the reserve, and changes made.
-- **Alerts** only for things that stop mail at scale: a tenant block, Gmail or
-  Microsoft starting to refuse a domain, failed authentication. Checked every
-  15 minutes on PlusVibe and EmailBison, three a day per workspace at most.
+- **End of day** at the time you pick (23:30 to start with), once the day's
+  sending is done: what needs a decision, worst first, then today's numbers per
+  workspace in columns, leads running low in the campaigns still taking new
+  leads, and the workspaces with nothing running on one line.
+- **Weekly** on Saturday at 17:00: the week per workspace against the same days
+  last week, the domains to stop, fix and delist, campaigns to scale or stop,
+  and the changes made.
+- **Monthly** on the 1st: the last 30 days per workspace, the domains lost and
+  how many to buy, the leads left, the changes made.
+- **Urgent**, to a channel of its own: a tenant block, Gmail or Microsoft
+  starting to refuse a domain, failed authentication, and on EmailBison
+  mailboxes disconnecting, a workspace that stops sending inside its hours, and
+  bounces spiking on a list being sent right now. Checked every 15 minutes;
+  everything one check finds comes as one message, each problem once a day,
+  with what to do.
+- **New problems** as they're found, if you want them, to the report channel.
+
+Each report is in the same few words: a status line, the decisions, the
+numbers. For example, an urgent message:
+
+```
+URGENT | Atlas Growth | 25 mailboxes disconnected since 14:10
+200 down now, most on closerdeskhq.com (12), closerdeskmail.com (8).
+ACTION: reconnect them in EmailBison, Email Accounts.
+```
 
 You can reply in the same chat ("which domains should I pause?") and the
 analyst answers there. It answers; it doesn't change anything. Nothing needs to
 be hosted; the app connects out to Slack and Telegram while it's open.
 
-![The daily report in Slack](docs/sitrep.png)
+![The end-of-day report in Slack](docs/sitrep.png)
 
 ## Making changes
 

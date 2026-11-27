@@ -873,9 +873,17 @@ class FakeBison:
             return iter([{'sender_email_id': 1, 'from_email_address': 'jane@outlook.com'}])
         if path == '/api/blacklisted-domains':
             return iter([{'id': 9, 'domain': 'icloud.com'}])
+        if path == '/api/campaigns':
+            return iter([{'id': 7, 'name': 'Owners', 'status': 'active', 'total_leads': 1000,
+                          'total_leads_contacted': 400, 'emails_sent': 900},
+                         {'id': 8, 'name': 'Old list', 'status': 'paused', 'total_leads': 5000,
+                          'total_leads_contacted': 100},
+                         {'id': 9, 'name': 'Draft', 'status': 'draft', 'total_leads': 50}])
         raise AssertionError(path)
 
     def get(self, path, **p):
+        if 1 not in (p.get('sender_email_ids[]') or [1]):
+            return {'data': []}                     # other.com's mailbox sent nothing
         days = [['2026-10-20T00:00:00Z', 100]]
         return {'data': [{'label': 'Sent', 'dates': days}, {'label': 'Bounced', 'dates': [['2026-10-20', 1]]},
                          {'label': 'Replied', 'dates': [['2026-10-20', 2]]}, {'label': 'Interested', 'dates': [['2026-10-20', 1]]}]}
@@ -892,7 +900,9 @@ class EmailBison(unittest.TestCase):
         from inboxsitrep import emailbison
         data = emailbison.collect(FakeBison(), days=21, today=datetime.date(2026, 10, 25), say=lambda m: None,
                                   lookup=False)
-        self.assertEqual(data.accounts['acme.com'], {'active': 1, 'down': 1})
+        self.assertEqual(data.accounts['acme.com'], {'active': 1, 'down': 1, 'idle': 0})
+        self.assertEqual(data.accounts['other.com']['idle'], 1)     # no campaign sent from it: a spare
+        self.assertEqual(sorted(data.campaigns), ['7', '8'])          # not the draft
         self.assertEqual(data.host['acme.com'], 'google')
         self.assertEqual(data.health['acme.com'][0], 91.0)
         sent = sum(data.row('acme.com', p, '2026-10-20')[SENT] for p in ('google', 'microsoft', 'other'))
@@ -1047,6 +1057,184 @@ class AddMany(unittest.TestCase):
         self.assertIn('2 of 4 added.', said)
 
 
+class Pulse(unittest.TestCase):
+    # The EmailBison checks every 15 minutes between full checks.
+
+    class Api:
+        def __init__(self):
+            self.sent, self.bounced, self.down = 0, 0, 100
+            self.camps = [{'id': 1, 'name': 'Owners', 'status': 'active'}, {'id': 2, 'status': 'draft'}]
+
+        def pages(self, path, **p):
+            if path == '/api/campaigns':
+                return iter(self.camps)
+            if path == '/api/sender-emails':
+                return iter([{'email': 'x%d@acme.com' % i} for i in range(self.down - 3)] +
+                            [{'email': 'y%d@beta.io' % i} for i in range(3)])
+            raise AssertionError(path)
+
+        def get(self, path, **p):
+            if path == '/api/campaign-events/stats':
+                assert p['campaign_ids[]'] == [1]                   # drafts never send
+                d = p['start_date']
+                return {'data': [{'label': 'Sent', 'dates': [[d, self.sent]]},
+                                 {'label': 'Bounced', 'dates': [[d, self.bounced]]}]}
+            if path == '/api/sender-emails':
+                return {'meta': {'total': self.down}}
+            if path == '/api/campaigns/1/schedule':
+                return {'data': {'monday': True, 'tuesday': True, 'wednesday': True, 'thursday': True,
+                                 'friday': True, 'saturday': False, 'sunday': False,
+                                 'start_time': '08:00:00', 'end_time': '18:00:00', 'timezone': 'UTC'}}
+            raise AssertionError(path)
+
+    def look(self, api, state, usual, at):
+        import datetime
+        from inboxsitrep import emailbison
+        now = datetime.datetime(2026, 11, 26, *at, tzinfo=datetime.timezone.utc)
+        return [t for t, _ in emailbison.pulse(api, state, usual, now)]
+
+    def test_mailboxes_disconnecting_are_urgent_once_the_standing_count_is_not(self):
+        api, state = self.Api(), {}
+        self.assertEqual(self.look(api, state, {}, (9, 0)), [])        # 100 down already: no news
+        api.down = 103
+        self.assertEqual(self.look(api, state, {}, (9, 15)), [])       # 3 more: the report says it
+        api.down = 110
+        got = self.look(api, state, {}, (9, 30))
+        self.assertEqual(got, ['7 mailboxes disconnected since 09:15'])
+        self.assertEqual(self.look(api, state, {}, (9, 45)), [])
+
+    def test_a_workspace_that_stops_inside_its_hours_and_a_bounce_spike(self):
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo('UTC')
+        except Exception:
+            self.skipTest('no time zone data here')
+        api, state = self.Api(), {}
+        usual = {'sent': 5000, 'bounce_rate': .01}
+        for h, sent in ((9, 1000), (10, 2000), (11, 2000), (12, 2000)):
+            api.sent = sent
+            got = self.look(api, state, usual, (h, 0))
+        self.assertEqual(got, ['Sent nothing since 10:00, inside its sending hours'])
+        self.assertEqual(self.look(api, state, usual, (12, 15)), [])           # once a day
+        # Done for the day is not stopped: most of a usual day went out.
+        api2, state2 = self.Api(), {}
+        for h in (9, 10, 11, 12):
+            api2.sent = 4500
+            self.assertEqual(self.look(api2, state2, usual, (h, 0)), [])
+        # 60 of the last hour's 1,000 bounced, against 1% usually.
+        api3, state3 = self.Api(), {}
+        api3.sent, api3.bounced = 1000, 10
+        self.look(api3, state3, usual, (9, 0))
+        api3.sent, api3.bounced = 2000, 70
+        self.assertEqual(self.look(api3, state3, usual, (10, 0)), ['Bounces at 6.0% in the last hour, 6x the usual'])
+
+
+class Leads(unittest.TestCase):
+
+    def test_only_campaigns_still_taking_new_leads_count(self):
+        import datetime
+        from inboxsitrep import checks, emailbison, reports
+
+        class Api:
+            contacted = {'7': 400, '8': 100, '9': 50}
+
+            def pages(self, path, **p):
+                return iter([{'id': 7, 'name': 'Owners', 'status': 'active', 'total_leads': 1000,
+                              'total_leads_contacted': self.contacted['7']},
+                             {'id': 8, 'name': 'Old list', 'status': 'paused', 'total_leads': 5000,
+                              'total_leads_contacted': self.contacted['8']},
+                             {'id': 9, 'name': 'Stuck', 'status': 'active', 'total_leads': 9000,
+                              'total_leads_contacted': self.contacted['9']}])
+        api, prior = Api(), None
+        for n, d in enumerate((20, 21, 22, 23)):
+            data = Data()
+            data.add_day('2026-11-%02d' % (d - 1))
+            api.contacted['7'] = 400 + 100 * n                  # 100 new leads a day
+            emailbison.campaigns(api, data, prior, datetime.date(2026, 11, d))
+            prior = data
+        self.assertTrue(data.campaigns['9']['idle'])            # active, but nobody new in days
+        left, pace = checks.leads_left(data, '2026-11-22')
+        self.assertEqual(left, {'Owners': 300})                  # not the paused one, not the stuck one
+        self.assertEqual(pace, 100)
+        self.assertEqual(reports.runway_days(data), (300, 100, 3.0))
+
+
+class Reports(unittest.TestCase):
+
+    def test_urgent_goes_to_its_own_channel_and_one_sweep_is_one_message(self):
+        from inboxsitrep import app, notify
+        hooks = []
+        with mock.patch.object(notify, 'webhook', lambda url, title, body: hooks.append((url, title))), \
+                mock.patch.object(notify, 'desktop', lambda *a: None):
+            cfg = {'webhook': 'https://hooks.example/reports', 'urgent_webhook': 'https://hooks.example/urgent'}
+            notify.send(cfg, 'SITREP', 'x')
+            notify.send(cfg, 'URGENT', 'x', urgent=True)
+            notify.send({'webhook': 'https://hooks.example/reports'}, 'URGENT', 'x', urgent=True)   # none of its own
+            notify.send({'urgent_webhook': 'https://hooks.example/urgent'}, 'SITREP', 'x')          # reports nowhere
+            with tempfile.TemporaryDirectory() as tmp, mock.patch.object(app, 'DATA', tmp):
+                c = app.Checker(app.Settings(os.path.join(tmp, 'c.json')), [])
+                c.urgent({'notify': cfg}, [('Atlas Growth', '7 mailboxes disconnected since 09:15', 'ACTION: reconnect'),
+                                           ('Summit Pipeline', 'Bounces at 6.0% in the last hour', 'ACTION: pause')])
+        self.assertEqual(hooks[:3], [('https://hooks.example/reports', 'SITREP'), ('https://hooks.example/urgent', 'URGENT'),
+                                     ('https://hooks.example/reports', 'URGENT')])
+        self.assertEqual(hooks[3:], [('https://hooks.example/urgent', 'URGENT | 2 problems | Atlas Growth, Summit Pipeline')])
+
+    def test_the_monthly_report_and_reports_due_together_share_one_check(self):
+        import datetime
+        from inboxsitrep import app, reports
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(app, 'DATA', tmp):
+            settings = app.Settings(os.path.join(tmp, 'c.json'))
+            self.assertEqual(settings.cfg['monthly'], {'day': 1, 'at': '17:00'})
+            self.assertEqual(settings.cfg['weekly'], {'day': 5, 'at': '17:00'})
+            c = app.Checker(settings, [])
+            cfg = {'report_at': [], 'weekly': {'day': 5, 'at': '17:00'}, 'monthly': {'day': 1, 'at': '17:00'},
+                   'fleets': [], 'notify': {}}
+            first = datetime.datetime(2026, 8, 1, 17, 5)                    # a Saturday, and the 1st
+            self.assertEqual(c.slot(cfg, first), ('monthly', '2026-08-01'))
+            self.assertEqual(c.until_report(cfg, datetime.datetime(2026, 11, 27, 18, 0)), (24 - 1) * 3600)
+            settings.cfg.update(cfg)
+            sent = []
+            with mock.patch.object(c, 'slot', side_effect=[('monthly', '2026-08-01'), ('weekly', '2026-08-01'), None]), \
+                    mock.patch.object(c, 'digest', lambda cfg, s: sent.append(s)), \
+                    mock.patch.object(c, 'check') as check:
+                settings.cfg['fleets'] = [{'name': 'W', 'db': os.path.join(tmp, 'w.db')}]
+                c.wake.set()
+                c.round()
+            self.assertEqual(sent, ['monthly', 'weekly'])
+            self.assertEqual(check.call_count, 1)
+            db = os.path.join(tmp, 'demo.db')
+            name, fleet = sim.demo(days=35)[0]
+            store.save(fleet.data, db, meta={'workspace': name})
+            incidents.save(incidents.track(fleet.data), db)
+            title, text = reports.monthly({'fleets': [{'name': name, 'db': db}, {'name': 'Empty', 'db': os.path.join(tmp, 'none.db')}]},
+                                          now=datetime.datetime.combine(datetime.date.fromisoformat(fleet.data.days[-1]), datetime.time(17)))
+        self.assertTrue(title.startswith('SITREP | MONTHLY | 30 days to '))
+        self.assertIn('*NUMBERS*, 30 days', text)
+        self.assertRegex(text, r'\*INFRASTRUCTURE\*\n- %s: \d+ sending, \d+ warmed spare' % name)
+        self.assertIn('*QUIET* all month: Empty.', text)
+
+    def test_a_workspace_with_nothing_running_is_quiet_and_off_the_dashboard(self):
+        import datetime
+        from inboxsitrep import app, reports
+        with tempfile.TemporaryDirectory() as tmp:
+            busy, idle, empty = (os.path.join(tmp, n + '.db') for n in ('busy', 'idle', 'empty'))
+            fleet = run_fleet(sim.standard(sim.Fleet(2)), 30)
+            for db in (busy, idle):
+                store.save(fleet.data, db, meta={'workspace': os.path.basename(db)})
+                incidents.save(incidents.track(fleet.data), db)
+            store.save(Data(), empty, meta={'workspace': 'empty'})
+            cfg = {'fleets': [{'name': 'Busy', 'db': busy}, {'name': 'Idle', 'db': idle}, {'name': 'Empty', 'db': empty}]}
+            live = lambda f: {'sent': 900, 'replies': 9, 'positives': 2, 'bounces': 18} if f['name'] == 'Busy' else \
+                {'sent': 0, 'replies': 0, 'positives': 0, 'bounces': 0}
+            title, text = reports.daily(cfg, today_live=live, now=datetime.datetime.combine(
+                datetime.date.fromisoformat(fleet.data.days[-1]) + datetime.timedelta(days=3), datetime.time(23, 30)))
+            self.assertTrue(text.startswith('1 sending |'))
+            self.assertIn('*NUMBERS*, today', text)
+            self.assertRegex(text, r'Busy +900 +1\.0% +2 +2\.0%')
+            self.assertRegex(text, r'\*QUIET\*, nothing running: Idle \(\d+ open\), Empty\.')
+            self.assertEqual([app.shown(db) for db in (busy, empty, os.path.join(tmp, 'gone.db'))], [True, False, False])
+
+
 class Window(unittest.TestCase):
 
     def test_only_the_apps_own_window_asks_before_closing(self):
@@ -1160,7 +1348,7 @@ class QuickSweep(unittest.TestCase):
             watch.client = lambda f: Fake()
             try:
                 c = app.Checker(Settings(), [])
-                c.alert = lambda cfg, name, title, body: alerts.append(title)
+                c.urgent = lambda cfg, found: alerts.extend(title for _, title, _ in found)
                 c.quick(Settings.cfg)
                 c.quick(Settings.cfg)          # within 15 minutes: nothing new
             finally:
@@ -1489,8 +1677,11 @@ class Demo(unittest.TestCase):
         # What a phone shows first: which workspaces need you.
         self.assertIn('RED: Northwind Outbound', title)
         self.assertIn('AMBER: Atlas Growth, Summit Pipeline', title)
-        self.assertTrue(text.startswith('3 workspaces: 1 RED, 2 AMBER.'))
-        self.assertIn('*Northwind Outbound* · RED\nYesterday (', text)
+        self.assertTrue(text.startswith('3 sending | 3 need a decision | 0 quiet'))
+        # Decisions first, worst first, then the day's numbers in columns.
+        self.assertLess(text.index('- RED  *Northwind Outbound*'), text.index('- AMBER  *Atlas Growth*'))
+        self.assertLess(text.index('*DECISIONS*'), text.index('*NUMBERS*, Yesterday ('))
+        self.assertRegex(text, r'Atlas Growth +[\d,]+ +[\d.]+% +\d+ +[\d.]+% +200/16,600')
         self.assertEqual(text.count('Microsoft has blocked outbound mail'), 1)     # each problem once
 
 
@@ -1623,13 +1814,13 @@ class ReportTimes(unittest.TestCase):
                 c.digest(cfg, '08:00')
             self.assertEqual(send.call_count, 1)
             title, body = send.call_args[0][1:3]
-            self.assertTrue(title.startswith('SITREP · '))
-            self.assertTrue(body.startswith('2 workspaces: '))
+            self.assertTrue(title.startswith('SITREP | '))
+            self.assertRegex(body, r'^\d sending \| \d need a decision \| \d quiet')
             c.failed = {'B': 'HTTP Error 502'}
             with mock.patch('inboxsitrep.notify.send') as send:
                 c.digest(cfg, 'weekly')
             title, body = send.call_args[0][1:3]
-            self.assertTrue(title.startswith('Weekly SITREP'))
+            self.assertTrue(title.startswith('SITREP | WEEKLY'))
             self.assertTrue(body.startswith('B: this check failed (HTTP Error 502)'))
             c.failed = {}
             friday = datetime.datetime(2026, 11, 6, 17, 5)

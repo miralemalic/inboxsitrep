@@ -135,7 +135,8 @@ def recipient(r, text, dom):
                  and domain_of(e) != dom), '')
 
 
-def collect(api, days=21, today=None, say=print, lookup=True):
+def collect(api, days=21, today=None, say=print, lookup=True, prior=None):
+    # prior: the last collection, for the leads' pace between checks.
     today = today or datetime.date.today()
     end = (today - datetime.timedelta(days=1)).isoformat()
     start = (today - datetime.timedelta(days=days)).isoformat()
@@ -240,8 +241,169 @@ def collect(api, days=21, today=None, say=print, lookup=True):
         data.add_day(day)
     for dom in by_dom:
         data.workspace.setdefault(dom, None)
+        # A spare: connected mailboxes on a domain no campaign sent from in
+        # the whole window (EmailBison doesn't say which are in a campaign).
+        busy = any(n[0] for (d, _), n in totals.items() if d == dom)
+        data.accounts[dom]['idle'] = 0 if busy else data.accounts[dom].get('active', 0)
+    say('campaigns and their leads')
+    campaigns(api, data, prior, today)
     say('%d domains, %d days, %d API calls' % (len(data.domains()), len(data.days), api.calls))
     return data
+
+
+SNAPSHOTS = 15      # days of lead counts kept, for the pace
+IDLE_DAYS = 2       # an active campaign that took no new lead this long is idle
+
+
+def campaigns(api, data, prior=None, today=None):
+    # The campaigns and their leads.  Leads left counts only an active
+    # campaign that is still taking new leads: one paused, done, or active
+    # but no longer starting anyone holds leads nobody will mail.
+    # EmailBison gives each campaign's totals as they are now; the pace is
+    # what moved between one day's look and the next, kept in raw.
+    day = today or datetime.date.today()
+    snaps = dict(((prior.raw if prior is not None else None) or {}).get('contacted') or {})
+    now = {}
+    for c in api.pages('/api/campaigns'):
+        status = (c.get('status') or '').lower()
+        if status in ('draft', 'archived'):
+            continue
+        cid = str(c['id'])
+        data.campaigns[cid] = {'name': c.get('name'), 'status': status.upper(),
+                               'lead_count': c.get('total_leads') or 0,
+                               'lead_contacted_count': c.get('total_leads_contacted') or 0,
+                               'sent_count': c.get('emails_sent') or 0,
+                               'replied_count': c.get('unique_replies') or 0,
+                               'positive_reply_count': c.get('interested') or 0,
+                               'bounced_count': c.get('bounced') or 0}
+        if status == 'active':
+            now[cid] = c.get('total_leads_contacted') or 0
+    snaps[day.isoformat()] = now
+    snaps = {d: snaps[d] for d in sorted(snaps)[-SNAPSHOTS:]}
+    data.raw['contacted'] = snaps
+    days = sorted(snaps)
+    for a, b in zip(days, days[1:]):
+        gap = (datetime.date.fromisoformat(b) - datetime.date.fromisoformat(a)).days
+        moved = sum(max(0, n - snaps[a][cid]) for cid, n in snaps[b].items() if cid in snaps[a])
+        # what moved over the days between, as a day's worth, on the last of them
+        last = (datetime.date.fromisoformat(b) - datetime.timedelta(days=1)).isoformat()
+        data.fresh[last] = round(moved / gap)
+    old = [d for d in days if (day - datetime.date.fromisoformat(d)).days >= IDLE_DAYS]
+    if old:
+        then = snaps[old[-1]]
+        for cid, n in now.items():
+            if cid in then and n == then[cid]:
+                data.campaigns[cid]['idle'] = True
+    return data.campaigns
+
+
+DOWN_JUMP = 5           # mailboxes disconnected since the last look that make it urgent
+STOPPED_HOURS = 2       # no sends this long inside the sending hours
+DONE_SHARE = .8         # unless today already sent this share of a usual day
+SPIKE_TIMES = 3         # bounces in the last hour against the usual rate
+SPIKE_SENT = 200        # out of at least this many sent in that hour
+SPIKE_BOUNCES = 10      # and at least this many bounces
+DAYS = ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')
+
+
+def today(api, day=None, camps=None):
+    # Today so far for the whole workspace: what its campaigns sent, and the
+    # replies, positives and bounces that came in.  EmailBison counts by
+    # campaign; drafts never send.
+    day = day if isinstance(day, str) else (day or datetime.date.today()).isoformat()
+    camps = list(api.pages('/api/campaigns')) if camps is None else camps
+    ids = [c['id'] for c in camps if (c.get('status') or '').lower() != 'draft']
+    if not ids:
+        return {'sent': 0, 'replies': 0, 'positives': 0, 'bounces': 0}
+    rows = api.get('/api/campaign-events/stats', start_date=day, end_date=day,
+                   **{'campaign_ids[]': ids}).get('data') or []
+    n = lambda label: sum(series(rows, label).values())
+    return {'sent': n('sent'), 'replies': n('replied'), 'positives': n('interested'), 'bounces': n('bounced')}
+
+
+def hours(api, camps, now):
+    # Today's sending hours of the active campaigns, as times here: each
+    # campaign keeps its own days, hours and timezone.
+    from zoneinfo import ZoneInfo
+    out = []
+    for c in camps:
+        if (c.get('status') or '').lower() != 'active':
+            continue
+        try:
+            s = api.get('/api/campaigns/%s/schedule' % c['id']).get('data') or {}
+            zone = ZoneInfo(s['timezone'])
+            there = now.astimezone(zone).date()
+            if not s.get(DAYS[there.weekday()]):
+                continue
+            a, b = (datetime.datetime.combine(there, datetime.time.fromisoformat(s[k]), zone).astimezone(now.tzinfo)
+                    for k in ('start_time', 'end_time'))
+        except (OSError, RuntimeError, KeyError, ValueError, TypeError):
+            continue
+        out.append([a.isoformat(timespec='minutes'), b.isoformat(timespec='minutes')])
+    return out
+
+
+def pulse(api, state, usual=None, now=None):
+    # Between checks, every 15 minutes, in a few calls: what can't wait for
+    # the report.  Mailboxes disconnecting, a workspace that stopped sending
+    # inside its hours, bounces spiking on a list being sent right now.
+    # state is kept by the caller between looks; usual is what the last
+    # check saw ({'bounce_rate', 'sent'}: the rate over two weeks, a usual
+    # day's sends).  Returns [(title, body)], each problem once a day.
+    usual = usual or {}
+    now = now or datetime.datetime.now().astimezone()
+    day = now.date().isoformat()
+    if (state.get('today') or {}).get('day') != day:
+        state['today'] = {'day': day, 'samples': [], 'alerted': [], 'hours': None}
+    t = state['today']
+    camps = list(api.pages('/api/campaigns'))
+    got = today(api, day, camps)
+    t['samples'] = (t['samples'] + [[now.isoformat(timespec='minutes'), got['sent'], got['bounces']]])[-120:]
+    if t['hours'] is None:
+        t['hours'] = hours(api, camps, now)
+    out = []
+
+    def once(key, title, body):
+        if key not in t['alerted']:
+            t['alerted'].append(key)
+            out.append((title, body))
+
+    def back(h):
+        # the latest look at least h hours ago, today
+        cut = now - datetime.timedelta(hours=h)
+        old = [x for x in t['samples'] if datetime.datetime.fromisoformat(x[0]) <= cut]
+        return old[-1] if old else None
+
+    down = (api.get('/api/sender-emails', status='not_connected').get('meta') or {}).get('total') or 0
+    before, last = state.get('down'), state.get('last')
+    state['down'], state['last'] = down, now.isoformat(timespec='minutes')
+    if before is not None and down - before >= DOWN_JUMP:
+        doms = collections.Counter(domain_of(x.get('email')) for x in api.pages('/api/sender-emails', status='not_connected'))
+        once('down:%d' % down, '%d mailboxes disconnected since %s' % (down - before, (last or '')[11:16]),
+             '%s down now, most on %s.\nACTION: reconnect them in EmailBison, Email Accounts.'
+             % (format(down, ','), ', '.join('%s (%d)' % kv for kv in doms.most_common(3))))
+
+    open_ = [(datetime.datetime.fromisoformat(a), datetime.datetime.fromisoformat(b)) for a, b in t['hours']
+             if datetime.datetime.fromisoformat(a) <= now <= datetime.datetime.fromisoformat(b)]
+    then = back(STOPPED_HOURS)
+    if (open_ and then and min(a for a, b in open_) <= now - datetime.timedelta(hours=STOPPED_HOURS)
+            and got['sent'] == then[1] and got['sent'] < DONE_SHARE * (usual.get('sent') or 0)):
+        once('stopped', 'Sent nothing since %s, inside its sending hours' % then[0][11:16],
+             '%s sent today against %s on a usual day; %d active campaign%s.\nACTION: check the campaigns '
+             'and the mailboxes in EmailBison: paused, out of leads, or disconnected.'
+             % (format(got['sent'], ','), format(round(usual.get('sent') or 0), ','), len(open_), '' if len(open_) == 1 else 's'))
+
+    hour = back(1)
+    rate = usual.get('bounce_rate')
+    if hour and rate is not None:
+        sent, bounced = got['sent'] - hour[1], got['bounces'] - hour[2]
+        if sent >= SPIKE_SENT and bounced >= SPIKE_BOUNCES and bounced / sent >= max(SPIKE_TIMES * rate, .03):
+            once('spike:%d' % int(bounced / sent * 20), 'Bounces at %.1f%% in the last hour, %.0fx the usual'
+                 % (100.0 * bounced / sent, bounced / sent / rate if rate else SPIKE_TIMES),
+                 '%d of %s bounced since %s; usually %.1f%%.\nACTION: find the campaign that started a new '
+                 'list today, pause it and verify the list.'
+                 % (bounced, format(sent, ','), hour[0][11:16], 100.0 * rate))
+    return out
 
 
 def poll(api, path, since, say=print):

@@ -104,7 +104,8 @@ def stalled(data, day, held=()):
 
 def leads_left(data, day):
     # Unsent leads per active campaign, and new leads contacted a day lately.
-    live = [c for c in data.campaigns.values() if c.get('status') == 'ACTIVE']
+    # One active but no longer starting anyone (idle) holds leads nobody mails.
+    live = [c for c in data.campaigns.values() if c.get('status') == 'ACTIVE' and not c.get('idle')]
     left = {}
     for c in live:
         n = (c.get('lead_count') or 0) - (c.get('lead_contacted_count') or 0)
@@ -124,7 +125,7 @@ def runway(data, day):
         return []
     total = sum(left.values())
     days = total / pace
-    live = [c for c in data.campaigns.values() if c.get('status') == 'ACTIVE']
+    live = [c for c in data.campaigns.values() if c.get('status') == 'ACTIVE' and not c.get('idle')]
     contacted = sum(c.get('lead_contacted_count') or 0 for c in live) or 1
     dry = []
     for c in live:

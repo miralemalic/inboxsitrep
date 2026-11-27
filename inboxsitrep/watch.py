@@ -146,7 +146,8 @@ def gather(fleet, say):
         return instantly.collect(api, days=days, say=say)
     if seq == 'emailbison':
         from . import emailbison
-        return emailbison.collect(api, days=days, say=say)
+        prior = store.load(fleet['db']) if os.path.exists(fleet['db']) else None
+        return emailbison.collect(api, days=days, say=say, prior=prior)
     data = None
     if seq == 'sim' and os.path.exists(fleet['db']):
         # A simulated fleet has nothing to collect; it is checked as it is.
@@ -172,6 +173,20 @@ def gather(fleet, say):
     if data is None:
         raise ValueError('nothing to read for %s' % fleet['name'])
     return data
+
+
+def usual(data):
+    # What a normal day looks like, for the checks between: the bounce rate
+    # over two weeks and a usual day's sends (the median of the days that
+    # sent), so a quiet afternoon or a bad hour can be told from normal.
+    from . import PROVIDERS
+    from .data import SENT, BOUNCES
+    days = data.days[-14:]
+    sent = sum(data.fleet(p, days)[SENT] for p in PROVIDERS)
+    bounced = sum(data.fleet(p, days)[BOUNCES] for p in PROVIDERS)
+    daily = sorted(n for n in (sum(data.fleet(p, [d])[SENT] for p in PROVIDERS) for d in days) if n)
+    return {'bounce_rate': bounced / sent if sent else None,
+            'sent': daily[len(daily) // 2] if daily else 0}
 
 
 def stale(data):
@@ -224,6 +239,7 @@ def watch_one(cfg, fleet, send, say, report=False, outbox=None):
             'collected': datetime.datetime.now().isoformat(timespec='seconds')}
     if fleet.get('sequencer') != 'sim':
         meta['source'] = fleet.get('sequencer', 'csv')
+    meta['usual'] = usual(data)
     store.save(data, fleet['db'], meta=meta)
     found = incidents.track(store.reclassify(data))
     incidents.save(found, fleet['db'])
