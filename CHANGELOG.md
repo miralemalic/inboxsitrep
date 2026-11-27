@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.2 (2026-11-27)
+
+- **Every mailbox that disconnects is urgent, named,** once a day each, on
+  EmailBison: "2 mailboxes disconnected since 21:15: jane@..., tom@...", or
+  counted by domain when there are many.  The disconnected count is one call
+  every 15 minutes; the list, to say which, is read only when it moved.
+  After the app was closed it says since when: "since Thu 21:15".
+- **The app shows as Inbox Sitrep** in the dock and the window list on Linux,
+  with its icon, instead of the script that runs it.
+
 ## 1.2.1 (2026-11-27)
 
 - **Leads left counts sending days.**  The pace was the average of the last
