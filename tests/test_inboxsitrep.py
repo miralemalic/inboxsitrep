@@ -1158,6 +1158,51 @@ class Leads(unittest.TestCase):
         self.assertEqual(pace, 100)
         self.assertEqual(reports.runway_days(data), (300, 100, 3.0))
 
+    def test_weekends_and_days_the_app_was_closed_dont_count(self):
+        import datetime
+        from inboxsitrep import checks, emailbison
+        # PlusVibe says each day's new leads, weekends as zeros: Tuesday's
+        # pace is the last three days that sent, not Sat, Sun and Mon.
+        data = Data()
+        data.campaigns = {'1': {'name': 'Owners', 'status': 'ACTIVE', 'lead_count': 5000, 'lead_contacted_count': 2000}}
+        data.fresh = {'2026-11-19': 600, '2026-11-20': 600, '2026-11-21': 0, '2026-11-22': 0, '2026-11-23': 600}
+        self.assertEqual(checks.leads_left(data, '2026-11-23')[1], 600)
+
+        # EmailBison: Mon-Fri campaigns, looked at every evening.
+        class Api:
+            contacted = {}
+
+            def pages(self, path, **p):
+                return iter([{'id': 7, 'name': 'Owners', 'status': 'active', 'total_leads': 5000,
+                              'total_leads_contacted': self.contacted['7']},
+                             {'id': 8, 'name': 'Second', 'status': 'active', 'total_leads': 5000,
+                              'total_leads_contacted': self.contacted['8']}])
+        api, prior = Api(), None
+        week = [('2026-11-19', 1000), ('2026-11-20', 1100), ('2026-11-21', 1100), ('2026-11-22', 1100),
+                ('2026-11-23', 1200)]                                       # Thu Fri Sat Sun Mon
+        for d, n in week:
+            data = Data()
+            api.contacted = {'7': n, '8': n}
+            emailbison.campaigns(api, data, prior, datetime.date.fromisoformat(d))
+            prior = data
+            if d == '2026-11-22':
+                self.assertFalse(data.campaigns['7'].get('idle'))           # Sunday: nothing sent, nobody stalled
+        self.assertEqual(data.fresh, {'2026-11-20': 200, '2026-11-21': 0, '2026-11-22': 0, '2026-11-23': 200})
+        self.assertEqual(checks.leads_left(data, '2026-11-23')[1], 200)    # not 200 over three days
+        # The app closed Tuesday to Thursday: Friday's look says nothing about one day.
+        api.contacted = {'7': 1500, '8': 1200}
+        friday = Data()
+        emailbison.campaigns(api, friday, prior, datetime.date(2026, 11, 27))
+        self.assertNotIn('2026-11-27', friday.fresh)
+        # Second takes nobody on two days the rest of the workspace sends: stalled.
+        for d, n in (('2026-11-28', 1600), ('2026-11-29', 1700)):
+            data = Data()
+            api.contacted = {'7': n, '8': 1200}
+            emailbison.campaigns(api, data, friday, datetime.date.fromisoformat(d))
+            friday = data
+        self.assertTrue(data.campaigns['8']['idle'])
+        self.assertFalse(data.campaigns['7'].get('idle'))
+
 
 class Reports(unittest.TestCase):
 
@@ -1647,7 +1692,7 @@ class Demo(unittest.TestCase):
         text = brief.brief(data, incidents.track(data))
         self.assertIn('one domain after another', text)
         self.assertNotIn('Gmail has stopped taking mail from', text)
-        self.assertRegex(text, r'\d+ campaigns run out of new leads within 2 days \(')
+        self.assertRegex(text, r'\d+ campaigns run out of new leads within 2 sending days \(')
         self.assertNotIn('track opens', text)          # PlusVibe says 0, not "no"
 
     def test_a_throttle_turned_refusal_is_not_told_twice(self):

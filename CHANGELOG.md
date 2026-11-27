@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.1 (2026-11-27)
+
+- **Leads left counts sending days.**  The pace was the average of the last
+  three days, weekends included as days that started nobody, so a Tuesday's
+  pace was a third of the real one and its days left three times too many:
+  the warning came late.  It is now the last three days the workspace
+  started anyone, on PlusVibe and EmailBison, and the reports say "sending
+  days".
+- On EmailBison a day's new leads are measured only between one day's look
+  and the next; days the app was closed are left out rather than averaged.
+- A campaign counts as stalled (its leads not counted) only when it started
+  nobody on two days the rest of the workspace did: on a Sunday nothing sends,
+  and every Monday-to-Friday campaign looked stalled.
+
 ## 1.2.0 (2026-11-27)
 
 Reports for an agency with twenty workspaces: fewer messages, each one

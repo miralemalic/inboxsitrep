@@ -252,7 +252,7 @@ def collect(api, days=21, today=None, say=print, lookup=True, prior=None):
 
 
 SNAPSHOTS = 15      # days of lead counts kept, for the pace
-IDLE_DAYS = 2       # an active campaign that took no new lead this long is idle
+IDLE_DAYS = 2       # sending days an active campaign may start nobody before it counts as stalled
 
 
 def campaigns(api, data, prior=None, today=None):
@@ -282,17 +282,23 @@ def campaigns(api, data, prior=None, today=None):
     snaps = {d: snaps[d] for d in sorted(snaps)[-SNAPSHOTS:]}
     data.raw['contacted'] = snaps
     days = sorted(snaps)
+    date = datetime.date.fromisoformat
+    steps = []
     for a, b in zip(days, days[1:]):
-        gap = (datetime.date.fromisoformat(b) - datetime.date.fromisoformat(a)).days
-        moved = sum(max(0, n - snaps[a][cid]) for cid, n in snaps[b].items() if cid in snaps[a])
-        # what moved over the days between, as a day's worth, on the last of them
-        last = (datetime.date.fromisoformat(b) - datetime.timedelta(days=1)).isoformat()
-        data.fresh[last] = round(moved / gap)
-    old = [d for d in days if (day - datetime.date.fromisoformat(d)).days >= IDLE_DAYS]
-    if old:
-        then = snaps[old[-1]]
-        for cid, n in now.items():
-            if cid in then and n == then[cid]:
+        moved = {cid: max(0, n - snaps[a][cid]) for cid, n in snaps[b].items() if cid in snaps[a]}
+        steps.append((a, b, moved))
+        # A day's new leads: from one day's last look to the next day's.  A
+        # gap (the app was closed) says nothing about any one day; a day
+        # that started nobody (a weekend) is left out of the pace.
+        if (date(b) - date(a)).days == 1:
+            data.fresh[b] = sum(moved.values())
+    # Stalled: active, but it started nobody on the last IDLE_DAYS looks
+    # that the rest of the workspace did.  A weekend, when nothing sends,
+    # stalls nobody.
+    busy = [m for a, b, m in steps if sum(m.values())][-IDLE_DAYS:]
+    if len(busy) == IDLE_DAYS:
+        for cid in now:
+            if all(cid in m and not m[cid] for m in busy):
                 data.campaigns[cid]['idle'] = True
     return data.campaigns
 
