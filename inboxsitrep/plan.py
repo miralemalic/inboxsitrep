@@ -154,7 +154,7 @@ class Operator:
                           'the sequencer, or take them out of rotation'),
             'stalled': ('check', n.get('domains') or [target], 'find out why: '
                         'out of leads, a paused campaign, or mailboxes moved'),
-            'runway': ('load_leads', [], 'load new leads: about %s days of new '
+            'runway': ('load_leads', [], 'load new leads: about %s sending days of new '
                        'contacts left' % n.get('days')),
             'bounce_guard': ('investigate', n.get('paused') or [], 'find what '
                              'bounced before resuming; resuming as is trips it '

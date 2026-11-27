@@ -110,7 +110,10 @@ def leads_left(data, day):
     for c in live:
         n = (c.get('lead_count') or 0) - (c.get('lead_contacted_count') or 0)
         left[c.get('name') or c.get('camp_name') or '?'] = max(0, n)
-    recent = [data.fresh[d] for d in sorted(data.fresh) if d <= day][-3:]
+    # The pace: the last three days it started anyone.  A weekend or a
+    # holiday starts nobody; counted, it made a Tuesday's pace a third of
+    # what it is.  So the days left are sending days.
+    recent = [n for d, n in sorted(data.fresh.items()) if d <= day and n > 0][-3:]
     pace = sum(recent) / len(recent) if recent else 0
     return left, pace
 
@@ -140,14 +143,14 @@ def runway(data, day):
         title = 'Active campaigns have no new leads left'
     else:
         title = ('Active campaigns run out of new leads in about %s: %s left, '
-                 '%s new leads contacted a day'
-                 % ('%.0f days' % days if days >= 1.5 else 'a day',
+                 '%s new leads contacted a sending day'
+                 % ('%.0f sending days' % days if days >= 1.5 else 'a sending day',
                     format(total, ','), format(round(pace), ',')))
         if dry:
-            title = ('%d campaign%s run%s out of new leads within %d days (%s%s); the workspace in about %s'
+            title = ('%d campaign%s run%s out of new leads within %d sending days (%s%s); the workspace in about %s'
                      % (len(dry), 's' if len(dry) > 1 else '', '' if len(dry) > 1 else 's', DRY_DAYS,
                         ', '.join(sorted(dry)[:3]), ' and %d more' % (len(dry) - 3) if len(dry) > 3 else '',
-                        '%.0f days' % days if days >= 1.5 else 'a day'))
+                        '%.0f sending days' % days if days >= 1.5 else 'a sending day'))
     return [finding('runway', 'fleet', 'leads', day, 'high', title,
                     left=total, pace=round(pace), days=round(days, 1),
                     campaigns=len(live), lowest=low, dry=sorted(dry))]

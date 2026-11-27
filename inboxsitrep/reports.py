@@ -230,7 +230,7 @@ def daily(cfg, today_live=None, now=None):
         rows.append({'name': name, 'state': state, 'items': items, 't': t, 'down': down, 'boxes': boxes})
         left = runway_days(data)
         if left and left[2] < LEADS_DAYS:
-            leads.append('%s: %s days of new leads left in running campaigns (%s left, %s a day).'
+            leads.append('%s: %s sending days of new leads left in running campaigns (%s left, %s a sending day).'
                          % (name, '%.1f' % left[2] if left[2] < 10 else '%.0f' % left[2],
                             format(left[0], ','), format(round(left[1]), ',')))
         r = checks.reserve(data, found, data.days[-1])
@@ -274,7 +274,7 @@ def daily(cfg, today_live=None, now=None):
 
 
 PER_WORKSPACE_DAILY = 3     # decision lines per workspace in the daily; the rest are in the app
-LEADS_DAYS = 3              # a leads line when a workspace has fewer days of new leads than this
+LEADS_DAYS = 3              # a leads line under this many sending days of new leads
 
 
 def table(rows, mark=False):
@@ -442,7 +442,7 @@ def monthly(cfg, now=None):
             infra_.append('%s: %d sending, %s' % (f['name'], r['sending'], spares(r)))
         left = runway_days(data)
         if left:
-            leads.append('%s: %s days of new leads in running campaigns (%s left).'
+            leads.append('%s: %s sending days of new leads in running campaigns (%s left).'
                          % (f['name'], '%.0f' % left[2], format(left[0], ',')))
         for h in history(f['db']):
             if h['at'][:10] >= since:
