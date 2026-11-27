@@ -19,9 +19,19 @@ def gtk(url, title, width, height, owner=False):
     import gi
     gi.require_version('Gtk', '3.0')
     gi.require_version('WebKit2', '4.1')
+    from gi.repository import GLib
+    # The name the desktop knows the app by (inboxsitrep.desktop), before
+    # GTK starts: without it the dock shows the script, __main__.py, and no
+    # icon.
+    GLib.set_prgname('inboxsitrep')
+    GLib.set_application_name(title)
     from gi.repository import Gtk, WebKit2
     win = Gtk.Window(title=title)
     win.set_default_size(width, height)
+    try:
+        win.set_icon_from_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'icon.svg'))
+    except GLib.Error:
+        pass
     view = WebKit2.WebView()
     settings = view.get_settings()
     settings.set_enable_developer_extras(False)

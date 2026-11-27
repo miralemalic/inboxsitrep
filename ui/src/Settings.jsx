@@ -126,7 +126,7 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
             <option value="new">Urgent alerts, and each new problem as it is found</option>
             <option value="off">Nothing; the reports only</option>
           </select>
-          <span /><p className="faint small">Urgent: what needs a decision now. A Microsoft tenant block, Gmail or Microsoft starting to refuse a domain, failing authentication; on EmailBison also 5 or more mailboxes disconnecting, a workspace that stops sending inside its campaigns' hours, and bounces running 3 times the usual rate. Checked every 15 minutes; everything one check finds, every workspace, comes as one message to the urgent channel, each problem once a day. New problems go to the report channel. Blocklists wait for the reports.</p>
+          <span /><p className="faint small">Urgent: what needs a decision now. A Microsoft tenant block, Gmail or Microsoft starting to refuse a domain, failing authentication; on EmailBison also every mailbox that disconnects, named, a workspace that stops sending inside its campaigns' hours, and bounces running 3 times the usual rate. Checked every 15 minutes; everything one check finds, every workspace, comes as one message to the urgent channel, each problem once a day. New problems go to the report channel. Blocklists wait for the reports.</p>
         </div>
       </section>
 

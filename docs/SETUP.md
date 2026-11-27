@@ -136,11 +136,11 @@ All of this is in **Settings**.
   or off.
 - **Between reports:** urgent alerts, checked every 15 minutes: tenant blocks,
   Gmail or Microsoft starting to refuse a domain, failed authentication, and on
-  EmailBison 5 or more mailboxes disconnecting, a workspace that stops sending
-  inside its campaigns' hours, and bounces at 3 times the usual rate. They go
-  to the **urgent channel** if you name one in the Slack settings (or an urgent
-  webhook), else to the report channel. Add each new problem as it's found if
-  you like. Blocklists wait for the reports.
+  EmailBison every mailbox that disconnects (named), a workspace that stops
+  sending inside its campaigns' hours, and bounces at 3 times the usual rate.
+  They go to the **urgent channel** if you name one in the Slack settings (or
+  an urgent webhook), else to the report channel. Add each new problem as it's
+  found if you like. Blocklists wait for the reports.
 - **Check every** few hours while the app is open.
 - **Open at login**, so it runs without you remembering to start it.
 

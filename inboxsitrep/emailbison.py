@@ -303,7 +303,7 @@ def campaigns(api, data, prior=None, today=None):
     return data.campaigns
 
 
-DOWN_JUMP = 5           # mailboxes disconnected since the last look that make it urgent
+DOWN_NAMED = 5          # mailboxes named in an alert; more are counted by domain
 STOPPED_HOURS = 2       # no sends this long inside the sending hours
 DONE_SHARE = .8         # unless today already sent this share of a usual day
 SPIKE_TIMES = 3         # bounces in the last hour against the usual rate
@@ -380,14 +380,32 @@ def pulse(api, state, usual=None, now=None):
         old = [x for x in t['samples'] if datetime.datetime.fromisoformat(x[0]) <= cut]
         return old[-1] if old else None
 
+    # Disconnected mailboxes: every one is news, named, once a day each.
+    # The count is one call; the list, to say which, is read only when the
+    # count moved (one dropping as another comes back in the same quarter
+    # hour goes unseen until the report).
     down = (api.get('/api/sender-emails', status='not_connected').get('meta') or {}).get('total') or 0
-    before, last = state.get('down'), state.get('last')
-    state['down'], state['last'] = down, now.isoformat(timespec='minutes')
-    if before is not None and down - before >= DOWN_JUMP:
-        doms = collections.Counter(domain_of(x.get('email')) for x in api.pages('/api/sender-emails', status='not_connected'))
-        once('down:%d' % down, '%d mailboxes disconnected since %s' % (down - before, (last or '')[11:16]),
-             '%s down now, most on %s.\nACTION: reconnect them in EmailBison, Email Accounts.'
-             % (format(down, ','), ', '.join('%s (%d)' % kv for kv in doms.most_common(3))))
+    if not t.get('boxes'):
+        t['boxes'] = (api.get('/api/sender-emails').get('meta') or {}).get('total') or 0
+    known, last = state.get('down_list'), state.get('last')
+    if known is None or down != state.get('down'):
+        now_down = sorted({x.get('email') for x in api.pages('/api/sender-emails', status='not_connected')} - {None})
+    else:
+        now_down = known
+    gone = [e for e in now_down if e not in set(known or ()) and e not in set(t.get('down_told') or ())] \
+        if known is not None else []
+    state['down_list'], state['down'], state['last'] = now_down, down, now.isoformat(timespec='minutes')
+    if gone:
+        t['down_told'] = (t.get('down_told') or []) + gone
+        doms = collections.Counter(domain_of(e) for e in gone)
+        which = (', '.join(gone) if len(gone) <= DOWN_NAMED else
+                 'on ' + ', '.join('%s (%d)' % kv for kv in doms.most_common(4)) +
+                 (' and %d more domains' % (len(doms) - 4) if len(doms) > 4 else ''))
+        then = datetime.datetime.fromisoformat(last) if last else now
+        since = then.strftime('%H:%M') if then.date() == now.date() else then.strftime('%a %H:%M')
+        out.append(('%d mailbox%s disconnected since %s' % (len(gone), 'es' if len(gone) > 1 else '', since),
+                    '%s.  %s down now of %s.\nACTION: reconnect %s in EmailBison, Email Accounts.'
+                    % (which, format(down, ','), format(t['boxes'], ','), 'them' if len(gone) > 1 else 'it')))
 
     open_ = [(datetime.datetime.fromisoformat(a), datetime.datetime.fromisoformat(b)) for a, b in t['hours']
              if datetime.datetime.fromisoformat(a) <= now <= datetime.datetime.fromisoformat(b)]

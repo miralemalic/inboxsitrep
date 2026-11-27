@@ -220,8 +220,8 @@ Each report is in the same few words: a status line, the decisions, the
 numbers. For example, an urgent message:
 
 ```
-URGENT | Atlas Growth | 25 mailboxes disconnected since 14:10
-200 down now, most on closerdeskhq.com (12), closerdeskmail.com (8).
+URGENT | Atlas Growth | 2 mailboxes disconnected since 14:10
+anna@closerdeskhq.com, tom@closerdeskmail.com.  200 down now of 16,600.
 ACTION: reconnect them in EmailBison, Email Accounts.
 ```
 

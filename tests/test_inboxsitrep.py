@@ -1080,7 +1080,7 @@ class Pulse(unittest.TestCase):
                 return {'data': [{'label': 'Sent', 'dates': [[d, self.sent]]},
                                  {'label': 'Bounced', 'dates': [[d, self.bounced]]}]}
             if path == '/api/sender-emails':
-                return {'meta': {'total': self.down}}
+                return {'meta': {'total': self.down if p.get('status') == 'not_connected' else 1000}}
             if path == '/api/campaigns/1/schedule':
                 return {'data': {'monday': True, 'tuesday': True, 'wednesday': True, 'thursday': True,
                                  'friday': True, 'saturday': False, 'sunday': False,
@@ -1093,15 +1093,25 @@ class Pulse(unittest.TestCase):
         now = datetime.datetime(2026, 11, 26, *at, tzinfo=datetime.timezone.utc)
         return [t for t, _ in emailbison.pulse(api, state, usual, now)]
 
-    def test_mailboxes_disconnecting_are_urgent_once_the_standing_count_is_not(self):
+    def test_every_mailbox_that_disconnects_is_named_once_a_day(self):
+        import datetime
+        from inboxsitrep import emailbison
         api, state = self.Api(), {}
-        self.assertEqual(self.look(api, state, {}, (9, 0)), [])        # 100 down already: no news
-        api.down = 103
-        self.assertEqual(self.look(api, state, {}, (9, 15)), [])       # 3 more: the report says it
-        api.down = 110
-        got = self.look(api, state, {}, (9, 30))
-        self.assertEqual(got, ['7 mailboxes disconnected since 09:15'])
-        self.assertEqual(self.look(api, state, {}, (9, 45)), [])
+
+        def look(at, down):
+            api.down = down
+            now = datetime.datetime(2026, 11, 26, *at, tzinfo=datetime.timezone.utc)
+            return emailbison.pulse(api, state, {}, now)
+        self.assertEqual(look((9, 0), 100), [])                         # 100 down already: the report says it
+        got = look((9, 15), 101)
+        self.assertEqual([t for t, _ in got], ['1 mailbox disconnected since 09:00'])
+        self.assertTrue(got[0][1].startswith('x97@acme.com.  101 down now of 1,000.'))
+        self.assertEqual(look((9, 30), 101), [])
+        self.assertEqual(look((9, 45), 100), [])                        # back
+        self.assertEqual(look((10, 0), 101), [])                        # the same one again today: told already
+        got = look((10, 15), 110)
+        self.assertEqual([t for t, _ in got], ['9 mailboxes disconnected since 10:00'])
+        self.assertIn('on acme.com (9)', got[0][1])
 
     def test_a_workspace_that_stops_inside_its_hours_and_a_bounce_spike(self):
         try:
