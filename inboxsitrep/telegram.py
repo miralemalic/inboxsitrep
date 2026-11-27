@@ -8,6 +8,7 @@
 # from a laptop while the app is open.  Only one chat is ever answered: the
 # one that sent the pairing code shown in Settings.
 
+import re
 import json
 import time
 import threading
@@ -36,6 +37,12 @@ def send(token, chat, text):
             part = part.rsplit('\n', 1)[0]
         call(token, 'sendMessage', {'chat_id': chat, 'text': part, 'disable_web_page_preview': True})
         text = text[len(part):].lstrip('\n')
+
+
+def pairs(text, code):
+    # The pairing code as typed: any case, with or without its dash, after /start.
+    said = re.sub(r'[\s-]', '', re.sub(r'^/start', '', text.strip(), flags=re.I)).upper()
+    return bool(code) and said == re.sub(r'[\s-]', '', code).upper()
 
 
 class Bot(threading.Thread):
@@ -76,8 +83,10 @@ class Bot(threading.Thread):
         if not chat or not text:
             return
         if not tg.get('chat_id'):
-            code = tg.get('code')
-            if code and code in text:
+            # The whole message must be the code, sent after it was made: a
+            # stranger who finds the bot can't try codes by the thousand, or
+            # one queued from before.
+            if pairs(text, tg.get('code')) and (msg.get('date') or 0) >= tg.get('made', 0):
                 tg['chat_id'] = chat
                 self.settings.save()
                 send(token, chat, 'Linked.  Reports will come to this chat.  Ask about any workspace, any time '

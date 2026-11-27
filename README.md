@@ -7,7 +7,8 @@ off warmup or tracking, all with an undo. It works with PlusVibe, Instantly
 and EmailBison, runs on your own device, and sends a short report to Slack or
 Telegram every morning.
 
-It was built, used and tested against 15+ workspaces and 200,000+ mailboxes.
+It was built, used and tested against 30+ PlusVibe and EmailBison workspaces
+and 225,000+ mailboxes.
 
 ![The briefing page](docs/app.png)
 
@@ -78,8 +79,9 @@ inboxsitrep app --install          # adds Inbox Sitrep to the Start menu
 
 Python 3.10 or newer, no other dependencies. Open it, add a workspace in
 Settings with its API key, and it reads the last 31 days. After that it only
-reads what changed. The [setup guide](docs/SETUP.md) covers each operating
-system, Slack and Telegram.
+reads what changed. Twenty workspaces? `inboxsitrep add workspaces.csv` adds
+them all at once and tries each key first. The [setup guide](docs/SETUP.md)
+covers each operating system, Slack and Telegram.
 
 ## How it judges a domain
 
@@ -203,12 +205,12 @@ One message covers all your workspaces, in Slack or Telegram:
 - **Weekly** on Saturday at 08:00: the week per workspace, domains to stop,
   fix and delist, campaigns to scale or stop, the reserve, and changes made.
 - **Alerts** only for things that stop mail at scale: a tenant block, Gmail or
-  Microsoft starting to refuse a domain, failed authentication. Three a day per
-  workspace at most.
+  Microsoft starting to refuse a domain, failed authentication. Checked every
+  15 minutes on PlusVibe and EmailBison, three a day per workspace at most.
 
 You can reply in the same chat ("which domains should I pause?") and the
-analyst answers there. Nothing needs to be hosted; the app connects out to
-Slack and Telegram while it's open.
+analyst answers there. It answers; it doesn't change anything. Nothing needs to
+be hosted; the app connects out to Slack and Telegram while it's open.
 
 ![The daily report in Slack](docs/sitrep.png)
 
@@ -226,6 +228,29 @@ Slack and Telegram while it's open.
   doing well asks you twice.
 - Recipient addresses are never stored. Bounce messages are kept with the
   addresses removed.
+- Changes are made here and nowhere else. The analyst, in the app, Slack or
+  Telegram, gets read-only tools, so neither a question nor a bounce message
+  written to steer it can change a workspace.
+
+## What leaves your computer
+
+- **API keys** go only to their sequencer, over HTTPS (an EmailBison address
+  must be `https://`, and a redirect never takes the key along). They live in
+  their own files that only you can read, never in the settings, the reports
+  or anything the analyst sees.
+- **Your sending domains** go to Cloudflare's and Google's DNS over HTTPS (which
+  also asks SURBL), the registries' RDAP, and each domain's own web server, to
+  check DNS, blocklists and registration.
+- **The domains of the people you write to**, from bounces and replies, go to
+  Cloudflare's DNS to tell who hosts them. Never their addresses.
+- **Reports** go to the Slack channel and Telegram chat you connect. The Slack
+  bot answers people in your own Slack, not another company's in a Slack
+  Connect channel, and Telegram pairs with the one chat that sends the code.
+- **The analyst** runs on your Claude Code login, so what it reads goes to
+  Anthropic as in any Claude Code session.
+- Nothing else: no account, no telemetry, no update check. The dashboard
+  answers only the app's own window, or with `inboxsitrep serve`, a link with
+  its token.
 
 ## Claude Code, Codex and Cursor
 
@@ -260,7 +285,7 @@ in 32 of 33 runs, and every time it was asked to fix something it asked first.
 |---|---|---|---|
 | PlusVibe | sends per mailbox and per recipient provider, bounce messages, replies, mailbox state, warmup, campaigns and copy, leads left | pause or cap domains, pause warmup, hold receivers, campaign settings | tested read-only on live workspaces |
 | Instantly | sends, bounces and replies per mailbox, bounced and replied leads, mailbox state, warmup | pause or cap domains, pause warmup, hold receivers | written from the API docs |
-| EmailBison | sender emails, daily events, bounce messages, warmup | pause or cap domains, pause warmup, hold receivers | written from the API docs |
+| EmailBison | sender emails, daily events, bounce messages, replies, warmup | pause or cap domains, pause warmup, hold receivers | tested read-only on live workspaces; changes written from the API docs |
 | Smartlead | mailbox connection and warmup | none | written from the API docs |
 | any CSV | a lead export (`inboxsitrep import`) | none | tested |
 
@@ -269,6 +294,7 @@ in 32 of 33 runs, and every time it was asked to fix something it asked first.
 ```
 inboxsitrep demo --dir try             # three demo workspaces
 inboxsitrep app                        # the desktop app
+inboxsitrep add workspaces.csv         # many workspaces at once: name,key[,sequencer,workspace,base_url]
 inboxsitrep brief --db fleet.db        # today's report, short enough to paste
 inboxsitrep ask "why did growthmail die?" --db fleet.db
 inboxsitrep dns --db fleet.db          # SPF, DKIM, DMARC, MX, SURBL, registration
@@ -280,8 +306,9 @@ inboxsitrep score                      # how it handles 20 simulated workspaces 
 
 - **PlusVibe can't stop one recipient provider for one domain,** so "stop Gmail
   on x.com" is a manual step. The app tells you which campaigns to edit.
-- **It only watches while the computer is awake.** For a machine that's always
-  on, `inboxsitrep schedule` sets up timers on Linux.
+- **It only watches while the app is open and the computer is awake.** Closing
+  the window ends the watch, so it asks first. For a machine that's always on,
+  `inboxsitrep schedule` sets up timers on Linux.
 - **Spam complaint rates aren't available** through sequencer APIs. Google
   Postmaster Tools has them for domains you verify there.
 

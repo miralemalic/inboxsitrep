@@ -5,7 +5,7 @@
 # inboxsitrep sim --db demo.db              a made-up fleet with real-world failures
 # inboxsitrep demo --dir try                three made-up workspaces, and the app on them
 # inboxsitrep import export.csv --db f.db   any sequencer's lead export
-# inboxsitrep collect --db fleet.db         read a PlusVibe workspace (read-only)
+# inboxsitrep collect --db fleet.db         read a workspace (read-only)
 # inboxsitrep dns --db fleet.db             SPF, DKIM, DMARC, MX and SURBL for every domain
 # inboxsitrep check --db fleet.db           find incidents, day by day
 # inboxsitrep report --db fleet.db [--ai]   write them up
@@ -17,6 +17,7 @@
 # inboxsitrep ask "why did growthmail die?"  the analyst answers, from the tools
 # inboxsitrep mcp --db fleet.db             the tools, for Claude Code, Codex or Cursor
 # inboxsitrep app                           the desktop app
+# inboxsitrep add workspaces.csv            many workspaces at once, each key tried first
 # inboxsitrep score                         how well all this does on 20 fleets
 
 import os
@@ -107,6 +108,12 @@ def cmd_collect(args):
         from . import instantly
         key = os.environ.get('INSTANTLY_KEY') or sys.exit('set INSTANTLY_KEY')
         data = instantly.collect(instantly.Client(key), days=args.days, say=say)
+    elif args.sequencer == 'emailbison':
+        from . import emailbison
+        key = os.environ.get('EMAILBISON_KEY')
+        if not key or not args.base_url:
+            sys.exit('set EMAILBISON_KEY and pass --base-url (your instance, e.g. https://send.example.com)')
+        data = emailbison.collect(emailbison.Client(key, args.base_url), days=args.days, say=say)
     else:
         from . import smartlead
         key = os.environ.get('SMARTLEAD_KEY') or sys.exit('set SMARTLEAD_KEY')
@@ -191,7 +198,7 @@ def cmd_mcp(args):
         # The desktop app's workspaces, so `inboxsitrep mcp` needs no setup.
         paths = [f['db'] for f in app.Settings(args.config).cfg['fleets'] if os.path.exists(f['db'])]
     # With no fleets the server still starts; its tools say what to do.
-    mcp.serve(paths)
+    mcp.serve(paths, read_only=args.read_only)
 
 
 def cmd_serve(args):
@@ -256,6 +263,26 @@ def cmd_app(args):
     app.main(args.config, check=not args.no_check, window=not args.no_window, port=args.port)
 
 
+def cmd_add(args):
+    # A CSV with a header: name,key and, as needed, sequencer, workspace
+    # (PlusVibe's id) and base_url (EmailBison's address).
+    import csv
+    from . import app
+    try:
+        f = sys.stdin if args.file == '-' else open(args.file, newline='', encoding='utf-8-sig')
+    except OSError as e:
+        sys.exit('inboxsitrep: %s' % e)
+    with f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        sys.exit('inboxsitrep: no rows in %s (the first line names the columns: name,key,...)' % args.file)
+    n = app.add_many(rows, args.config, sequencer=args.sequencer, base_url=args.base_url,
+                     test=not args.no_test)
+    print('%d of %d added.' % (n, len(rows)))
+    if n and args.file != '-':
+        print('The keys are in their own files now; %s still has them, so delete it.' % args.file)
+
+
 def cmd_why(args):
     from . import rootcause, dns
     need_fleet(args.db)
@@ -308,9 +335,10 @@ def main(argv=None):
 
     c = sub.add_parser('collect', help='read a workspace (read-only)')
     c.add_argument('--db', required=True)
-    c.add_argument('--sequencer', default='plusvibe', choices=('plusvibe', 'instantly', 'smartlead'),
-                   help='key from PLUSVIBE_KEY, INSTANTLY_KEY or SMARTLEAD_KEY')
+    c.add_argument('--sequencer', default='plusvibe', choices=('plusvibe', 'instantly', 'emailbison', 'smartlead'),
+                   help='key from PLUSVIBE_KEY, INSTANTLY_KEY, EMAILBISON_KEY or SMARTLEAD_KEY')
     c.add_argument('--workspace', help='workspace id (PlusVibe)')
+    c.add_argument('--base-url', help="your instance's address (EmailBison)")
     c.add_argument('--days', type=int, default=21)
     c.add_argument('-v', '--verbose', action='store_true')
     c.set_defaults(func=cmd_collect)
@@ -346,6 +374,7 @@ def main(argv=None):
     m = sub.add_parser('mcp', help='the tools over stdio, for Claude Code, Codex, Cursor')
     m.add_argument('--db', action='append', help='a fleet database; default: every workspace in the app')
     m.add_argument('--config', help='default ~/.config/inboxsitrep/config.json')
+    m.add_argument('--read-only', action='store_true', help='leave out the tools that preview and apply changes')
     m.set_defaults(func=cmd_mcp)
 
     v = sub.add_parser('serve', help='the dashboard')
@@ -384,6 +413,15 @@ def main(argv=None):
     ap.add_argument('--port', type=int)
     ap.add_argument('--install', action='store_true', help='add it to your applications menu')
     ap.set_defaults(func=cmd_app)
+
+    ad = sub.add_parser('add', help='add many workspaces at once from a CSV: name,key[,sequencer,workspace,base_url]')
+    ad.add_argument('file', help="the CSV, or - to read it from stdin")
+    ad.add_argument('--sequencer', choices=('plusvibe', 'instantly', 'emailbison', 'smartlead'),
+                    help='for rows that do not say')
+    ad.add_argument('--base-url', help="EmailBison: your instance's address, for rows that do not say")
+    ad.add_argument('--config', help='default ~/.config/inboxsitrep/config.json')
+    ad.add_argument('--no-test', action='store_true', help='add them without trying each key first')
+    ad.set_defaults(func=cmd_add)
 
     wl = sub.add_parser('why-listed', help='what the blocklisted domains have in common')
     wl.add_argument('--db', required=True)

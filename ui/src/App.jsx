@@ -93,7 +93,8 @@ export default function App() {
     })
   }, [])
   useEffect(() => { reload() }, [reload])
-  // Follow a running check closely; read the results when it ends.
+  // Follow a running check closely; read the results when it ends, and
+  // each workspace's as it finishes, so twenty don't wait for the last one.
   useEffect(() => {
     const t = setInterval(() => {
       tick(n => n + 1)
@@ -101,6 +102,8 @@ export default function App() {
         if (prev && prev.state && prev.state.busy && !a.state.busy) {
           reload()
           setToast('Check finished. ' + (a.state.log.slice(-1)[0] || '').replace(/^\S+\s+/, ''))
+        } else if (prev && prev.state && a.state.busy && a.state.done > (prev.state.done || 0)) {
+          reload()
         }
         return a
       }))

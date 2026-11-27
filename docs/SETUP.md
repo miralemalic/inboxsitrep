@@ -50,11 +50,30 @@ Open Inbox Sitrep and go to **Settings → Workspaces**.
 |---|---|
 | PlusVibe | the workspace id and an API key |
 | Instantly | an API key (v2) |
-| EmailBison | your instance address and an API key |
+| EmailBison | your instance address (as its API page shows it, with or without `/api`) and the workspace's API key |
 
 Press **Add**. It tests the key straight away with one small read and tells
 you if the key or the workspace is wrong. The first check reads 31 days, which
-takes a few minutes on a big workspace. After that it only reads what changed.
+takes a few minutes on a big workspace, and longer on one with thousands of
+mailboxes. After that it only reads what changed. A workspace that hasn't sent
+anything yet is noted and looked at again on the next round.
+
+**Many workspaces?** Put them in a CSV with a header line and add them all at
+once. Each key is tried first, and one that doesn't work is left out:
+
+```
+name,key
+Acme,12|abcdef...
+Globex,34|ghijkl...
+```
+
+```
+inboxsitrep add workspaces.csv --sequencer emailbison --base-url https://send.example.com
+```
+
+Columns `sequencer`, `workspace` (PlusVibe's id) and `base_url` set those per
+row. If the app is open, it takes them and checks them next. The keys go into
+their own private files, so delete the CSV afterwards.
 
 It won't change anything in the workspace until you allow it in Settings. Even
 then, every change shows you what it will do and waits for you to approve it,
@@ -65,7 +84,8 @@ No API key handy? The first screen offers demo data to try it on.
 ## 3. Connect Slack
 
 Reports go to a channel. Mention the app or send it a direct message and the
-analyst replies in the thread.
+analyst replies in the thread. It answers people in your own Slack only, not
+another company's in a Slack Connect channel, and it can't change anything.
 
 1. **Settings → Slack → Create the Slack app.** Slack opens with the app
    already filled in. Pick your workspace, then **Next** and **Create**.
@@ -111,11 +131,14 @@ All of this is in **Settings**.
 - **Daily report** at the times you set (08:00 and 17:00 to start with). Every
   workspace is checked fresh first, and one message covers them all.
 - **Weekly report** on Saturday at 08:00, after Friday's sending is done.
-- **Between reports:** urgent alerts only, checked every 15 minutes. That
-  means tenant blocks, Gmail or Microsoft starting to refuse a domain, and
-  failed authentication. Blocklists wait for the daily report.
+- **Between reports:** urgent alerts only, checked every 15 minutes on
+  PlusVibe and EmailBison. That means tenant blocks, Gmail or Microsoft
+  starting to refuse a domain, and failed authentication. Blocklists wait for
+  the daily report.
 - **Check every** few hours while the app is open.
 - **Open at login**, so it runs without you remembering to start it.
 
-It only watches while the computer is awake. To keep watch around the clock,
-run `inboxsitrep schedule` on a Linux machine that stays on.
+It only watches while the app is open and the computer is awake. Closing its
+window ends the watch, so it asks first; a second window onto the same app
+just closes. To keep watch around the clock, run `inboxsitrep schedule` on a
+Linux machine that stays on.

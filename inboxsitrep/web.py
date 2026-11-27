@@ -417,11 +417,12 @@ class Fleet:
         return {'ok': True}
 
 
-def handler(fleets, secret=None, app=None):
+def handler(fleets, secret=None, app=None, guard=None):
     # With `app` (the desktop app), every API call must carry the token the
     # app opened its window with, and the Host must be the loopback address
     # it listens on: no other program, and no web page that rebinds a name
-    # to 127.0.0.1, can read the fleet or change a setting.
+    # to 127.0.0.1, can read the fleet or change a setting.  `serve` brings
+    # its own token in `guard` ({'token', 'port'}; no port: any Host).
 
     def pick(query):
         want = query.get('fleet', [None])[0]
@@ -443,17 +444,18 @@ def handler(fleets, secret=None, app=None):
             self.wfile.write(body)
 
         def allowed(self, query):
-            if not app:
-                return True
+            lock = guard or (app and {'token': app['token'], 'port': app['port']})
+            if not lock:
+                return True             # a test's own server
             host = self.headers.get('Host', '')
-            if host not in ('127.0.0.1:%d' % app['port'], 'localhost:%d' % app['port']):
+            if lock.get('port') and host not in ('127.0.0.1:%d' % lock['port'], 'localhost:%d' % lock['port']):
                 return False
             given = self.headers.get('X-Token') or query.get('t', [''])[0]
-            return hmac.compare_digest(given, app['token'])
+            return hmac.compare_digest(given.encode(), lock['token'].encode())
 
         def body(self):
             size = int(self.headers.get('Content-Length') or 0)
-            if size > 1 << 20:
+            if not 0 <= size <= 1 << 20:
                 raise ValueError('too big')
             return json.loads(self.rfile.read(size) or b'{}')
 
@@ -550,7 +552,7 @@ def handler(fleets, secret=None, app=None):
                 if not hmac.compare_digest(path.split('/')[2], secret):
                     return self.send(403, {'error': 'no'})
                 size = int(self.headers.get('Content-Length') or 0)
-                if size > 1 << 20:
+                if not 0 <= size <= 1 << 20:
                     return self.send(413, {'error': 'too big'})
                 try:
                     body = json.loads(self.rfile.read(size) or b'{}')
@@ -561,9 +563,16 @@ def handler(fleets, secret=None, app=None):
 
         def static(self, path):
             name = os.path.normpath(path.lstrip('/')) or 'index.html'
-            if name.startswith('..'):
+            # Inside the built dashboard and nowhere else: on Windows a path
+            # like /C:/Users/... would otherwise join to a file anywhere.
+            root = os.path.realpath(STATIC)
+            full = os.path.realpath(os.path.join(root, name))
+            try:
+                inside = os.path.commonpath([root, full]) == root
+            except ValueError:             # another drive
+                inside = False
+            if name.startswith('..') or not inside:
                 return self.send(403, {'error': 'no'})
-            full = os.path.join(STATIC, name)
             if not os.path.isfile(full):
                 full = os.path.join(STATIC, 'index.html')
             if not os.path.isfile(full):
@@ -815,12 +824,23 @@ def change_post(app, what, body):
         act = actions.combine([make_act(fleet, cfg, c, inc['id'] if inc else None) for c in changes])
         act['understood'] = note
         act['allowed'] = sim or bool(cfg.get('writes'))
+        act['fleet'] = fleet.name           # applied there and nowhere else
         app['pending'][act['id']] = act
         return act
     if what == 'apply':
         act = app['pending'].get(body.get('id'))
         if not act:
             raise ValueError('preview again: that preview is gone')
+        # The workspace the preview was made for, whatever the request says:
+        # a blocklist entry or a pause meant for one client never lands in
+        # another's.
+        if body.get('fleet') and body['fleet'] != act.get('fleet'):
+            raise ValueError('that preview is for %s, not %s' % (act.get('fleet'), body['fleet']))
+        fleet = next((f for f in app['fleets'] if f.name == act.get('fleet')), None)
+        if fleet is None:
+            raise ValueError('preview again: %s is gone' % act.get('fleet'))
+        cfg = fleet_cfg(app, fleet.name)
+        sim = cfg.get('sequencer') == 'sim'
         if not (sim or fleet_cfg(app, fleet.name).get('writes')):
             raise ValueError('changes are off for %s; allow them first' % fleet.name)
         if act['big'] and body.get('confirm', '').strip() != fleet.name:
@@ -844,6 +864,9 @@ def change_post(app, what, body):
         done = next((c for c in actions.history(fleet.path) if c['id'] == act['id']), {})
         return {'status': status, 'checked': done.get('checked')}
     if what == 'undo':
+        # An undo is a change too: un-pausing a burned domain needs changes on.
+        if not (sim or cfg.get('writes')):
+            raise ValueError('changes are off for %s; allow them first' % fleet.name)
         writer = None if sim else writer_for(cfg)
         say = lambda m: app['checker'].say('%s: %s' % (fleet.name, m))
         title = next((h['title'] for h in actions.history(fleet.path) if h['id'] == body['id']), body['id'])
@@ -852,15 +875,41 @@ def change_post(app, what, body):
 
 
 def serve(paths, port=8008, secret=None, host='127.0.0.1'):
+    # The dashboard on its own, with a token like the app's: without one,
+    # any web page open in a browser could read every workspace from it.
+    import sys
+    from . import notify
     if isinstance(paths, str):
         paths = [paths]
     fleets = [Fleet(p) for p in paths]
-    server = http.server.ThreadingHTTPServer((host, port), handler(fleets, secret))
-    print('inboxsitrep: http://%s:%d  (%s, Ctrl-C to stop)'
-          % (host, port, ', '.join(f.name for f in fleets)))
+    token = dashboard_token(notify.KEYS)
+    loop = host in ('127.0.0.1', 'localhost', '::1')
+    server = http.server.ThreadingHTTPServer((host, port), handler(
+        fleets, secret, guard={'token': token, 'port': port if loop else None}))
+    where = '127.0.0.1' if loop else host
+    # The link with its token to a terminal; to a log, only where it is.
+    shown = token if sys.stdout.isatty() else '<the token in %s>' % os.path.join(notify.KEYS, 'dashboard.key')
+    print('inboxsitrep: http://%s:%d/?t=%s  (%s, Ctrl-C to stop)'
+          % (where, port, shown, ', '.join(f.name for f in fleets)))
     if secret:
-        print('  webhooks: POST http://%s:%d/hook/<secret>' % (host, port))
+        print('  webhooks: POST http://%s:%d/hook/<secret>' % (where, port))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def dashboard_token(keys):
+    # Kept, so a dashboard that runs as a service keeps its link.
+    import secrets
+    path = os.path.join(keys, 'dashboard.key')
+    if os.path.exists(path):
+        with open(path) as f:
+            token = f.read().strip()
+        if token:
+            return token
+    os.makedirs(keys, mode=0o700, exist_ok=True)
+    token = secrets.token_urlsafe(18)
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
+        f.write(token + '\n')
+    return token

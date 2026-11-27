@@ -12,9 +12,10 @@
 #                "db": "~/fleets/main.db", "live": true}],
 #    "notify": {"desktop": true, "webhook": null},
 #    "sitreps": "~/.local/share/inboxsitrep/sitreps"}
-# sequencer is plusvibe, instantly, smartlead (with "export": a lead CSV)
-# or csv (an export only).  Keys come from key_file or key_env, never the
-# config itself.
+# sequencer is plusvibe, instantly, emailbison (with "base_url": your
+# instance's address), smartlead (with "export": a lead CSV) or csv (an
+# export only).  Keys come from key_file or key_env, never the config
+# itself.  `inboxsitrep add` adds many workspaces at once.
 
 import os
 import sys
@@ -57,23 +58,44 @@ def key(fleet):
     return ''
 
 
-def client(fleet):
+def client(fleet, secret=None):
+    # secret: a key not saved yet (`inboxsitrep add` tries each one first).
     seq = fleet.get('sequencer', 'csv')
+    if seq not in NAMES:
+        return None
+    k = secret or key(fleet)
     if seq == 'plusvibe':
         from . import plusvibe
-        return plusvibe.Client(key(fleet), fleet['workspace'])
+        return plusvibe.Client(k, fleet['workspace'])
     if seq == 'instantly':
         from . import instantly
-        return instantly.Client(key(fleet))
+        return instantly.Client(k)
     if seq == 'smartlead':
         from . import smartlead
-        return smartlead.Client(key(fleet))
+        return smartlead.Client(k)
     if seq == 'emailbison':
         from . import emailbison
         if not fleet.get('base_url'):
             raise ValueError('EmailBison needs your instance address, e.g. https://send.example.com')
-        return emailbison.Client(key(fleet), fleet['base_url'])
-    return None
+        return emailbison.Client(k, fleet['base_url'])
+
+
+# The sequencers live mode can poll between checks.
+LIVE = ('plusvibe', 'emailbison')
+
+
+def reader(fleet):
+    # Live mode's poll() for this fleet's sequencer.
+    if fleet.get('sequencer') == 'emailbison':
+        from . import emailbison
+        return emailbison.poll
+    return live.poll
+
+
+class Idle(Exception):
+    # A workspace that has sent nothing yet: there is nothing to check, and
+    # that is not a failure.  It is looked at again at the next round.
+    pass
 
 
 # One small read per sequencer, to tell a working key from a wrong one
@@ -85,25 +107,28 @@ PROBES = {'plusvibe': ('/account/list', {'skip': 0, 'limit': 1}),
 NAMES = {'plusvibe': 'PlusVibe', 'instantly': 'Instantly', 'emailbison': 'EmailBison', 'smartlead': 'Smartlead'}
 
 
-def probe(fleet):
+def probe(fleet, secret=None):
     seq = fleet.get('sequencer')
     if seq not in PROBES:
         return 'Nothing to test for %s.' % seq
-    if not key(fleet):
+    if not (secret or key(fleet)):
         raise ValueError('no API key saved for %s' % fleet['name'])
     path, params = PROBES[seq]
     try:
-        client(fleet).get(path, **params)
+        client(fleet, secret).get(path, **params)
     except (OSError, RuntimeError) as e:
         code = getattr(e, 'code', None)
         if code and 400 <= code < 500:
             try:
-                said = e.read()[:300].decode('utf-8', 'replace').strip()
-                said = json.loads(said).get('message') or said
+                said = e.read()[:600].decode('utf-8', 'replace').strip()
+                body = json.loads(said)
+                # EmailBison puts it one level down: {"data": {"message": ...}}
+                said = body.get('message') or (body.get('data') or {}).get('message') or said
             except (OSError, AttributeError, ValueError):
                 said = ''
-            raise ValueError('%s refused it: %s.  Check the key and the workspace id'
-                             % (NAMES[seq], str(said).rstrip('.') or 'error %s' % code))
+            raise ValueError('%s refused it: %s.  Check the key%s'
+                             % (NAMES[seq], str(said).rstrip('.') or 'error %s' % code,
+                                {'plusvibe': ' and the workspace id', 'emailbison': ' and the address'}.get(seq, '')))
         raise ValueError('could not read the workspace: %s' % (str(e)[:160] or e.__class__.__name__))
     return 'The key works: %s answered.' % fleet['name']
 
@@ -162,7 +187,7 @@ SITREPS = '~/.local/share/inboxsitrep/sitreps'
 
 def sitrep_file(cfg, fleet, text):
     where = path(cfg.get('sitreps') or SITREPS)
-    os.makedirs(where, exist_ok=True)
+    os.makedirs(where, mode=0o700, exist_ok=True)
     slug = fleet['name'].lower().replace(' ', '-')
     name = os.path.join(where, '%s-%s.md' % (slug, datetime.datetime.now().strftime('%Y-%m-%d-%H%M')))
     with open(name, 'w') as f:
@@ -180,7 +205,11 @@ def watch_one(cfg, fleet, send, say, report=False, outbox=None):
             data.workspace[dom] = fleet['name']
         if os.path.exists(fleet['db']):
             store.carry(store.load(fleet['db']), data)
-        if data.days and stale(data):
+        if not data.days:
+            n = sum(data.mailboxes.values())
+            raise Idle('nothing sent in the last %d days (%s): nothing to check yet'
+                       % (fleet.get('days', 31), '%d mailboxes' % n if n else 'no mailboxes yet'))
+        if stale(data):
             say('checking DNS')
             dns.check_all(data, say=say)
     # New since the last check; for a report, new since the last report.
@@ -247,6 +276,8 @@ def run(cfg, only=None, say=print):
             continue
         try:
             watch_one(cfg, fleet, send, lambda m, n=fleet['name']: say('%s: %s' % (n, m)))
+        except Idle as e:
+            say('%s: %s' % (fleet['name'], e))
         except (OSError, RuntimeError, ValueError) as e:
             say('%s: failed: %s' % (fleet['name'], e))
             send('inboxsitrep could not read %s' % fleet['name'], str(e)[:200])
@@ -254,9 +285,9 @@ def run(cfg, only=None, say=print):
 
 def live_loop(cfg, every=15, once=False, say=print):
     send = notify.sender(cfg.get('notify'))
-    fleets = [f for f in cfg.get('fleets', []) if f.get('live') and f.get('sequencer') == 'plusvibe']
+    fleets = [f for f in cfg.get('fleets', []) if f.get('live') and f.get('sequencer') in LIVE]
     if not fleets:
-        sys.exit('inboxsitrep: no fleet in the config has "live": true (PlusVibe only, for now)')
+        sys.exit('inboxsitrep: no fleet in the config has "live": true (PlusVibe and EmailBison)')
     while True:
         for fleet in fleets:
             if not os.path.exists(fleet['db']):
@@ -264,7 +295,7 @@ def live_loop(cfg, every=15, once=False, say=print):
             live.cycle(client(fleet), fleet['db'],
                        lambda t, b, n=fleet['name']: send('%s: %s' % (n, t), b),
                        lambda m, n=fleet['name']: say('%s %s: %s' % (
-                           datetime.datetime.now().strftime('%H:%M'), n, m)))
+                           datetime.datetime.now().strftime('%H:%M'), n, m)), reader=reader(fleet))
         if once:
             return
         time.sleep(every * 60)

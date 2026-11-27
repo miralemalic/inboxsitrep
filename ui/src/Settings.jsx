@@ -114,7 +114,7 @@ export default function Settings({ app, reload, redact, toggleRedact }) {
             <option value="new">Urgent alerts, and each new problem as it is found</option>
             <option value="off">Nothing; the reports only</option>
           </select>
-          <span /><p className="faint small">Urgent: what stops mail at scale. A Microsoft tenant block, Gmail or Microsoft starting to refuse a domain, failing authentication. Bounces are read every 15 minutes; each domain alerts once a day, at most three alerts a day per workspace. Blocklists go in the reports. PlusVibe workspaces only.</p>
+          <span /><p className="faint small">Urgent: what stops mail at scale. A Microsoft tenant block, Gmail or Microsoft starting to refuse a domain, failing authentication. Bounces are read every 15 minutes; each domain alerts once a day, at most three alerts a day per workspace. Blocklists go in the reports. PlusVibe and EmailBison workspaces.</p>
         </div>
       </section>
 

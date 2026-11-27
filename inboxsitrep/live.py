@@ -188,8 +188,9 @@ def poll(client, path, since, say=print):
     return got
 
 
-def cycle(client, path, notify=None, say=print):
+def cycle(client, path, notify=None, say=print, reader=None):
     # One look: poll, store, alert on what is new.  The caller loops.
+    # reader: the sequencer's poll(); PlusVibe's unless given.
     from . import data as store_
     seen = set(store_.get_meta(path, 'alerted', []) or [])
     since = (store_.get_meta(path, 'live') or {}).get('last') or (
@@ -197,7 +198,7 @@ def cycle(client, path, notify=None, say=print):
     ).strftime('%Y-%m-%d %H:%M:%S')
     started = now()
     try:
-        got = poll(client, path, since, say)
+        got = (reader or poll)(client, path, since, say)
         since = max([e['ts'] for e in got] + [since])
     except (OSError, RuntimeError) as e:
         say('poll failed: %s' % e)
