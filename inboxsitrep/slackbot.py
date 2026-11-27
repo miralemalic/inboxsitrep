@@ -7,7 +7,9 @@
 # has to be reachable from the internet and it works from a laptop.  It
 # runs while the desktop app is open.  Mention the app in a channel
 # (@Inbox Sitrep how are my domains doing?) or send it a direct message.  It only
-# answers; changes are still made in the app, after a preview.
+# answers, with read-only tools; changes are still made in the app, after a
+# preview.  It answers people in your own Slack, not another company's in a
+# Slack Connect channel.
 #
 # Two tokens from the Slack app: a bot token (xoxb-, scopes app_mentions:read,
 # chat:write, im:history) and an app-level token (xapp-, connections:write).
@@ -51,7 +53,8 @@ def manifest_url():
 def post(token, channel, text):
     # A report to a channel through the bot (chat:write.public: no invite
     # needed for public channels).
-    call('chat.postMessage', token, {'channel': channel, 'text': text, 'unfurl_links': False})
+    call('chat.postMessage', token, {'channel': channel, 'text': text, 'unfurl_links': False,
+                                     'unfurl_media': False})
 
 
 def call(method, token, body=None):
@@ -186,8 +189,15 @@ class Bot(threading.Thread):
             ws.send(json.dumps({'envelope_id': env['envelope_id']}))
         if env.get('type') == 'disconnect':
             return False
-        ev = (env.get('payload') or {}).get('event') or {}
+        p = env.get('payload') or {}
+        ev = p.get('event') or {}
         if env.get('type') != 'events_api' or ev.get('bot_id') or ev.get('subtype'):
+            return True
+        # Only people in your own Slack.  In a Slack Connect channel (one
+        # shared with a client, say) the other company's people could
+        # otherwise read every workspace's numbers, every client's.
+        if p.get('is_ext_shared_channel') or (ev.get('user_team') and p.get('team_id')
+                                               and ev['user_team'] != p['team_id']):
             return True
         if not (ev.get('type') == 'app_mention' or (ev.get('type') == 'message' and ev.get('channel_type') == 'im')):
             return True
@@ -206,7 +216,8 @@ class Bot(threading.Thread):
         try:
             call('chat.postMessage', bot, {'channel': channel, 'thread_ts': ts, 'text': 'Received. Checking the numbers.'})
             out = self.answer(text)
-            call('chat.postMessage', bot, {'channel': channel, 'thread_ts': ts, 'text': chat(out)})
+            call('chat.postMessage', bot, {'channel': channel, 'thread_ts': ts, 'text': chat(out),
+                                           'unfurl_links': False, 'unfurl_media': False})
             self.say('Slack: answered "%s"' % text[:60])
         except (OSError, RuntimeError) as e:
             self.say('Slack: could not answer: %s' % str(e)[:120])

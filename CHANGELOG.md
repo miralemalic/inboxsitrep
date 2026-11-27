@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.1.0 (2026-11-27)
+
+- **EmailBison, run on live workspaces.** Read-only checks on nineteen
+  workspaces, from a few hundred sender emails to nine thousand, turned up
+  what the API reference doesn't say:
+  - Replies and bounces are read with EmailBison's cursor.  Its page numbers
+    stop at 1,000, and a big workspace has more bounces than that, so its
+    check failed every time.
+  - Only the 31 days a check uses are read, newest first: a workspace with a
+    year of bounces takes minutes, not an hour.
+  - The address as EmailBison's API page shows it, ending in `/api`, works as
+    it is.
+  - A page that hangs is asked again after 30 seconds, not two minutes.
+  - A wrong key says what EmailBison said, not its JSON.
+- **Urgent alerts every 15 minutes on EmailBison too,** as on PlusVibe: a
+  tenant block, Gmail or Microsoft starting to refuse a domain, failed
+  authentication.  `inboxsitrep live` polls EmailBison workspaces as well.
+- **`inboxsitrep add workspaces.csv`** adds twenty workspaces at once.  Each
+  key is tried first and one that doesn't work is left out; an open app takes
+  them and checks them next.  `inboxsitrep collect` reads EmailBison too.
+- **A workspace that hasn't sent anything yet** is noted and looked at again
+  next round.  It failed every check before, and kept the 15-minute alerts
+  from running.
+- **The dashboard shows each workspace as its check finishes,** not when the
+  last of twenty does.
+- **Closing the app's window asks first,** since it ends the watch.  A second
+  window onto the same app just closes.
+- **Safer with many clients:**
+  - The analyst gets read-only tools.  It said it could not change anything;
+    now it can't.  Changes are made in the app, after the preview, and an
+    approved change is applied to the workspace it was previewed for.  Undo
+    needs changes allowed, like any other change.
+  - The Slack bot answers people in your own Slack, not another company's in
+    a Slack Connect channel.  Telegram pairs only on the whole code, now eight
+    characters, sent after it was made.
+  - `inboxsitrep serve` needs a token, like the app.  The dashboard serves
+    only its own files, on Windows too.
+  - EmailBison keys go only over HTTPS, are never carried along a redirect,
+    and moving a workspace to a new address needs its key again.
+  - The data folder is yours alone.  The README says what leaves your
+    computer, and where to.
+
 ## 1.0.0 (2026-11-04), first public release
 
 - **`inboxsitrep demo`**: three simulated workspaces, a third each on Google

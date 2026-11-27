@@ -3,7 +3,8 @@
 
 # inboxsitrep's findings as tools for an AI agent: a Model Context Protocol
 # server over stdin and stdout, the way Claude Code, Codex and Cursor plug
-# tools in.  Every tool only reads.
+# tools in.  Every tool reads, but the change tools, which preview and then
+# apply only what the user has approved; --read-only leaves those out.
 #
 #   claude mcp add inboxsitrep -- python -m inboxsitrep mcp --db fleet.db
 #
@@ -323,6 +324,11 @@ REQUIRED = {'incident': ['id'], 'domain': ['domain'], 'family': ['name'], 'find'
             'preview_change': ['incident'], 'propose_change': ['op'], 'apply_change': ['change_id'],
             'undo_change': ['change_id']}
 WRITES = {'apply_change', 'undo_change'}
+# What a read-only server leaves out: everything that leads to a change.
+# The analyst behind the chat box, Slack and Telegram gets one, so a
+# question, or a bounce message written to steer it, can't change a
+# workspace; changes are made in the app, after its preview.
+CHANGES = {'preview_change', 'propose_change', 'apply_change', 'undo_change'}
 
 
 def schema(name):
@@ -332,6 +338,7 @@ def schema(name):
 
 def handle(f, msg):
     method, mid = msg.get('method'), msg.get('id')
+    tools = [n for n in TOOLS if not (getattr(f, 'read_only', False) and n in CHANGES)]
     if method == 'initialize':
         want = (msg.get('params') or {}).get('protocolVersion') or VERSION
         return {'protocolVersion': want, 'capabilities': {'tools': {}},
@@ -342,11 +349,11 @@ def handle(f, msg):
     if method == 'tools/list':
         return {'tools': [{'name': n, 'description': TOOLS[n][1], 'inputSchema': schema(n),
                            'annotations': {'readOnlyHint': n not in WRITES,
-                                           'destructiveHint': n in WRITES}} for n in TOOLS]}
+                                           'destructiveHint': n in WRITES}} for n in tools]}
     if method == 'tools/call':
         p = msg.get('params') or {}
         name, args = p.get('name'), p.get('arguments') or {}
-        if name not in TOOLS:
+        if name not in tools:
             return {'content': [{'type': 'text', 'text': 'no tool %s' % name}], 'isError': True}
         try:
             out = TOOLS[name][0](f, **args)
@@ -361,8 +368,9 @@ def handle(f, msg):
     raise LookupError(method)
 
 
-def serve(paths, inp=sys.stdin, out=sys.stdout):
+def serve(paths, inp=sys.stdin, out=sys.stdout, read_only=False):
     f = Fleets(paths)
+    f.read_only = read_only
     for raw in inp:
         if not raw.strip():
             continue

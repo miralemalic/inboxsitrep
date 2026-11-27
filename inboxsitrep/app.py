@@ -120,7 +120,8 @@ class Settings:
                 # A new bot, or a new chat: pair again with a fresh code.
                 if body.get('telegram_token'):
                     self.keep('telegram.key', body['telegram_token'])
-                self.cfg['notify']['telegram'] = {'code': '%06d' % secrets.randbelow(10 ** 6), 'chat_id': None}
+                self.cfg['notify']['telegram'] = {'code': pairing_code(), 'made': int(time.time()),
+                                                  'chat_id': None}
             if 'desktop' in body:
                 self.cfg['notify']['desktop'] = bool(body['desktop'])
             if 'autostart' in body:
@@ -151,13 +152,72 @@ class Settings:
         if f.get('key'):
             new['key_file'] = self.keep(slug(name) + '.key', f['key'])
         if f.get('base_url') is not None:
-            new['base_url'] = f['base_url'].strip().rstrip('/')
+            url = f['base_url'].strip().rstrip('/')
+            if old is not None and old.get('base_url') and url != old['base_url'] and not f.get('key'):
+                # The saved key goes to the new address on the next read:
+                # whoever moves it must have the key.
+                raise ValueError('a new address for %s needs its key again' % name)
+            new['base_url'] = url
         if 'writes' in f:
             # Changes allowed for this workspace; each one is still
             # previewed and approved.
             new['writes'] = bool(f['writes'])
         if old is None:
             self.cfg['fleets'].append(new)
+
+
+def add_many(rows, cfg_path=None, sequencer=None, base_url=None, test=True, say=print):
+    # Many workspaces at once (an agency has twenty), from rows with a name,
+    # a key and, for PlusVibe, the workspace id or, for EmailBison, the
+    # instance address.  Each key is tried first; one that doesn't work is
+    # left out, and said so.  A name already there gets the new key.  When
+    # the app is open it takes them itself: it would write over a settings
+    # file changed under it.
+    settings = Settings(cfg_path)
+    fleets = []
+    for n, row in enumerate(rows, 1):
+        row = {(k or '').strip().lower(): (v or '').strip() for k, v in row.items()}
+        f = {'name': row.get('name', ''), 'key': row.get('key') or row.get('api_key', ''),
+             'sequencer': row.get('sequencer') or sequencer or '',
+             'workspace': row.get('workspace') or row.get('workspace_id') or None,
+             'base_url': row.get('base_url') or base_url or None}
+        if not f['name'] or not f['key']:
+            say('row %d: left out, it needs a name and a key' % n)
+            continue
+        if f['sequencer'] not in SEQUENCERS:
+            say('%s: left out, the sequencer is one of %s' % (f['name'], ', '.join(SEQUENCERS)))
+            continue
+        if test:
+            try:
+                watch.probe(f, f['key'])
+            except ValueError as e:
+                say('%s: left out, %s' % (f['name'], e))
+                continue
+        fleets.append(f)
+        say('%s: %s' % (f['name'], 'the key works' if test else 'added'))
+    if not fleets:
+        return 0
+    there = running(lock_file(settings))
+    if there:
+        import urllib.request
+        root, token = there.split('/?t=')
+        req = urllib.request.Request(root + '/api/app/settings', data=json.dumps({'fleets': fleets}).encode(),
+                                     method='POST', headers={'X-Token': token, 'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=60).close()
+        say('the open app took them; it checks them next')
+    else:
+        settings.update({'fleets': fleets})
+        say('saved to %s; the app checks them when it opens' % settings.path)
+    return len(fleets)
+
+
+def pairing_code():
+    # Eight letters and digits that can't be misread (no 0 and O, no 1 and I):
+    # a trillion to guess, where six digits were a million, and a message
+    # full of digits tried thousands at once.
+    abc = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    code = ''.join(secrets.choice(abc) for _ in range(8))
+    return code[:4] + '-' + code[4:]
 
 
 def report_times(value):
@@ -195,6 +255,7 @@ class Checker(threading.Thread):
         self.failed = {}
         self.outbox = []
         self.swept = {}
+        self.idle = {}                  # workspaces with nothing sent yet: when last looked at
         self.reported_file = os.path.join(state_dir(settings), 'reports.json')
         try:
             with open(self.reported_file) as f:
@@ -238,7 +299,10 @@ class Checker(threading.Thread):
 
     def due(self, f):
         if not os.path.exists(f['db']):
-            return True
+            # One that has sent nothing yet waits for the next round like
+            # the rest, so it doesn't keep the quick sweeps from running.
+            tried = self.idle.get(f['name'])
+            return not tried or time.time() - tried >= float(self.settings.cfg['every_hours']) * 3600
         last = store.get_meta(f['db'], 'collected')
         if not last:
             return True
@@ -347,6 +411,9 @@ class Checker(threading.Thread):
                 self.state['fleet'] = None      # so saying so doesn't stop again
                 self.say('%s: stopped; the last complete check is still shown' % f['name'])
                 break
+            except watch.Idle as e:
+                self.say(str(e))
+                self.idle[f['name']] = time.time()
             except Exception as e:      # keep watching whatever one fleet does
                 self.say('failed: %s' % e)
                 self.failed[f['name']] = str(e)[:160] or e.__class__.__name__
@@ -374,6 +441,8 @@ class Checker(threading.Thread):
         times = []
         for f in cfg['fleets']:
             last = os.path.exists(f['db']) and store.get_meta(f['db'], 'collected')
+            if not last and f['name'] in self.idle:
+                last = datetime.datetime.fromtimestamp(self.idle[f['name']]).isoformat(timespec='seconds')
             if not last:
                 return datetime.datetime.now().isoformat(timespec='minutes')
             times.append(datetime.datetime.fromisoformat(last)
@@ -384,10 +453,10 @@ class Checker(threading.Thread):
         # Between full checks: only the bounces since the last look, read
         # in two light requests, for the signatures that can't wait hours
         # (a tenant block, Gmail starting to refuse a domain, a blocklist
-        # naming one).  PlusVibe only, for now.
+        # naming one).  PlusVibe and EmailBison.
         from . import live
         for f in cfg['fleets']:
-            if f.get('sequencer') != 'plusvibe' or not os.path.exists(f['db']):
+            if f.get('sequencer') not in watch.LIVE or not os.path.exists(f['db']):
                 continue
             if time.time() - self.swept.get(f['name'], 0) < QUICK * 60 - 5:
                 continue
@@ -395,7 +464,7 @@ class Checker(threading.Thread):
             try:
                 live.cycle(watch.client(f), f['db'],
                            notify=lambda t, b, n=f['name']: self.alert(cfg, n, t, b),
-                           say=lambda m: None)
+                           say=lambda m: None, reader=watch.reader(f))
             except (OSError, RuntimeError, ValueError) as e:
                 self.state['quick_error'] = str(e)[:200]
 
@@ -499,6 +568,13 @@ def running(path):
 
 def main(cfg_path=None, check=True, window=True, port=None):
     settings = Settings(cfg_path)
+    # The log, the reports and the databases say a lot about a business:
+    # only you can open the folder they are in.
+    os.makedirs(DATA, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(DATA, 0o700)
+    except OSError:
+        pass
     lock = lock_file(settings)
     there = running(lock)
     if there:
@@ -548,7 +624,7 @@ def main(cfg_path=None, check=True, window=True, port=None):
         except KeyboardInterrupt:
             return
     from .window import open_window
-    if not open_window(url):
+    if not open_window(url, owner=True):
         # A browser window we can't wait on: stay up until interrupted.
         print('inboxsitrep is running at %s  (Ctrl-C to stop)' % url, file=sys.stderr)
         try:

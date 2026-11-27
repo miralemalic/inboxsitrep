@@ -4,15 +4,21 @@
 # Read an EmailBison workspace into Inbox Sitrep's counts.
 #
 # Written from EmailBison's published OpenAPI reference (served by every
-# instance at /api/reference.openapi); not yet run against a live account.
-# Each customer has their own address (https://send.example.com), and a
-# Bearer token from Settings > Developer API.  Reads with GET only.
+# instance at /api/reference.openapi) and run read-only on live
+# workspaces, from a few hundred sender emails to nine thousand.  Each
+# customer has their own address (https://send.example.com), and a Bearer
+# token per workspace from Settings > Developer API.  Reads with GET only.
 #
 # EmailBison gives the sender email list (status, daily limit, warmup),
 # a breakdown of campaign events by date that can be narrowed to a set of
 # sender emails, and a replies inbox with a "bounced" folder holding the
 # bounce messages.  Sends per day come per domain from the breakdown; who
 # hosts the recipients comes from the bounce and reply addresses.
+#
+# What the reference doesn't say: every list comes 15 a page whatever
+# per_page asks for, page numbers stop at 1000, and the replies have no
+# date filter but come newest first.  A big workspace has more than 15,000
+# bounces, so the replies are read by cursor and only back to the window.
 
 import re
 import json
@@ -32,13 +38,29 @@ FREE = {'gmail.com': 'google', 'googlemail.com': 'google', 'outlook.com': 'micro
         'icloud.com': 'apple', 'me.com': 'apple', 'mac.com': 'apple'}
 EMAIL = re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
 SERVICE = re.compile(r'mailer-daemon|postmaster|no-?reply', re.I)
+TIMEOUT = 30        # seconds to wait for one page
+LIVE_MOST = 600     # replies read per folder in one live look
+
+
+class Stay(urllib.request.HTTPRedirectHandler):
+    # Python follows a redirect with the Authorization header still on, to
+    # wherever it points; the key goes to your instance and nowhere else.
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(Stay)
 
 
 class Client:
 
     def __init__(self, key, base, verbose=False):
         self.key = key
-        self.base = base.rstrip('/')
+        # The address as EmailBison's API page shows it ends in /api; the
+        # paths here start with /api already.
+        self.base = re.sub(r'/api$', '', base.strip().rstrip('/'))
+        if not re.match(r'https://|http://(localhost|127\.0\.0\.1)(:\d+)?$', self.base):
+            raise ValueError("EmailBison: use your instance's https:// address, so the key isn't sent in the clear")
         self.calls = 0
         self.last = 0.0
 
@@ -57,7 +79,9 @@ class Client:
             self.last = time.time()
             self.calls += 1
             try:
-                with urllib.request.urlopen(req, timeout=120) as r:
+                # A page comes back in under a second, the slowest in a few;
+                # one that hangs is asked again rather than waited on.
+                with OPENER.open(req, timeout=TIMEOUT) as r:
                     return json.loads(r.read() or b'{}')
             except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
                 code = getattr(e, 'code', None)
@@ -69,8 +93,19 @@ class Client:
     def get(self, path, **params):
         return self.request('GET', path, params)
 
-    def pages(self, path, limit=500, **params):
-        # length_aware pagination: data + meta.last_page.
+    def pages(self, path, limit=500, cursor=False, **params):
+        # length_aware pagination: data + meta.last_page.  EmailBison serves
+        # 15 a page whatever per_page says and refuses pages past 1000 (422),
+        # so long lists (the replies) follow meta.next_cursor instead.
+        if cursor:
+            after = None
+            while True:
+                body = self.get(path, pagination_type='cursor', **dict(params, **({'cursor': after} if after else {})))
+                for item in body.get('data') or []:
+                    yield item
+                after = (body.get('meta') or {}).get('next_cursor')
+                if not body.get('data') or not after:
+                    return
         page = 1
         while True:
             body = self.get(path, page=page, per_page=limit, **params)
@@ -88,6 +123,16 @@ def series(rows, label):
         if (s.get('label') or '').lower() == label:
             return {d[:10]: n for d, n in s.get('dates') or []}
     return {}
+
+
+def recipient(r, text, dom):
+    # Who a bounce was for: the lead it belongs to, or failing that the
+    # first address in the message that is neither ours nor a mail server.
+    lead = (r.get('lead') or {}).get('email')
+    if lead:
+        return lead
+    return next((e for e in EMAIL.findall(text) if not SERVICE.search(e)
+                 and domain_of(e) != dom), '')
 
 
 def collect(api, days=21, today=None, say=print, lookup=True):
@@ -132,16 +177,29 @@ def collect(api, days=21, today=None, say=print, lookup=True):
     say('bounce messages and replies')
     ids = {i: dom for dom, l in by_dom.items() for i in l}
     bounced, replied = [], []
-    for r in api.pages('/api/replies', folder='bounced'):
+    older = 0
+    for r in api.pages('/api/replies', cursor=True, folder='bounced'):
         day = (r.get('date_received') or '')[:10]
+        # Newest first: once a run of them is from before the window, the
+        # rest are too (a big workspace holds a year of bounces).
+        older = older + 1 if day and day < start else 0
+        if older >= 50:
+            break
         dom = ids.get(r.get('sender_email_id'))
         if not dom or not (start <= day <= end):
             continue
         text = r.get('text_body') or r.get('raw_body') or ''
-        rcpt = next((e for e in EMAIL.findall(text) if not SERVICE.search(e)
-                     and domain_of(e) != dom), '')
-        bounced.append((day, dom, domain_of(rcpt), text))
-    for r in api.pages('/api/replies', folder='inbox'):
+        bounced.append((day, dom, domain_of(recipient(r, text, dom)), text))
+    # The replies say who hosts the people being written to now; the same
+    # window keeps a big inbox from taking an hour (old pages come slowly).
+    older = 0
+    for r in api.pages('/api/replies', cursor=True, folder='inbox'):
+        day = (r.get('date_received') or '')[:10]
+        older = older + 1 if day and day < start else 0
+        if older >= 50:
+            break
+        if day and day < start:
+            continue
         dom = ids.get(r.get('sender_email_id'))
         if dom:
             replied.append((dom, domain_of(r.get('from_email_address'))))
@@ -184,3 +242,27 @@ def collect(api, days=21, today=None, say=print, lookup=True):
         data.workspace.setdefault(dom, None)
     say('%d domains, %d days, %d API calls' % (len(data.domains()), len(data.days), api.calls))
     return data
+
+
+def poll(api, path, since, say=print):
+    # Live mode: bounces and replies since `since` (UTC, as live keeps it),
+    # newest first, for the alerts that can't wait for the next check.  A
+    # bounce is addressed to the sender email that sent the mail; of the
+    # person it was for, only who hosts them is kept.
+    from . import live
+    got = []
+    for folder in ('bounced', 'inbox'):
+        for n, r in enumerate(api.pages('/api/replies', cursor=True, folder=folder)):
+            ts = (r.get('date_received') or '')[:19].replace('T', ' ')
+            if ts <= since or n >= LIVE_MOST:
+                break
+            ours = r.get('primary_to_email_address')
+            if folder == 'bounced':
+                text = r.get('text_body') or r.get('raw_body') or ''
+                got.append(live.event(ts, 'poll', 'bounce', ours, recipient(r, text, domain_of(ours)), text))
+            else:
+                got.append(live.event(ts, 'poll', 'positive' if r.get('interested') else 'reply',
+                                      ours, r.get('from_email_address')))
+    n = live.store(path, got)
+    say('%d new events' % n)
+    return got

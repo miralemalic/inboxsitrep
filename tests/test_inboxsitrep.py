@@ -78,11 +78,11 @@ class Families(unittest.TestCase):
 
     def test_lookalikes_group_and_strangers_do_not(self):
         doms = ['growthmailads.com', 'growthmailpro.com', 'growthmailscale.co',
-                'hvproptech.com', 'example.org']
+                'harborlight.io', 'example.org']
         fams = detect.families(doms)
         self.assertEqual(fams['growthmailads.com'], 'growthmail')
         self.assertEqual(fams['growthmailscale.co'], 'growthmail')
-        self.assertNotIn('hvproptech.com', fams)
+        self.assertNotIn('harborlight.io', fams)
         self.assertNotIn('example.org', fams)
 
 
@@ -913,6 +913,150 @@ class EmailBison(unittest.TestCase):
         with self.assertRaises(ValueError):
             w.send('DELETE', '/api/sender-emails/1', {})
 
+    def test_the_address_as_the_api_page_shows_it_works(self):
+        from inboxsitrep import emailbison
+        for given in ('https://send.example.com/api', 'https://send.example.com/api/', 'https://send.example.com'):
+            self.assertEqual(emailbison.Client('k', given).base, 'https://send.example.com')
+
+    def test_long_lists_follow_the_cursor_past_page_1000(self):
+        from inboxsitrep import emailbison
+        api, asked = emailbison.Client('k', 'https://send.example.com'), []
+
+        def get(path, **p):
+            asked.append((p.get('pagination_type'), p.get('cursor'), p.get('folder')))
+            n = {None: 0, 'b': 1, 'c': 2}[p.get('cursor')]
+            return {'data': [{'id': n}], 'meta': {'next_cursor': ['b', 'c', None][n]}}
+        api.get = get
+        self.assertEqual([r['id'] for r in api.pages('/api/replies', cursor=True, folder='bounced')], [0, 1, 2])
+        self.assertEqual(asked, [('cursor', None, 'bounced'), ('cursor', 'b', 'bounced'), ('cursor', 'c', 'bounced')])
+
+    def test_replies_are_read_back_to_the_window_and_no_further(self):
+        # A big workspace holds a year of bounces, newest first; only the
+        # window is read.
+        import datetime
+        from inboxsitrep import emailbison
+
+        class Year(FakeBison):
+            read = 0
+
+            def pages(self, path, **p):
+                if path != '/api/replies':
+                    return super().pages(path, **p)
+                return self.replies()
+
+            def replies(self):
+                for n in range(50 * 400):
+                    self.read += 1
+                    day = datetime.date(2026, 10, 24) - datetime.timedelta(days=n // 50)
+                    yield {'sender_email_id': 1, 'date_received': day.isoformat() + 'T10:00:00.000000Z',
+                           'text_body': 'Delivery to bob@gmail.com failed: 550 5.1.1 no such user',
+                           'from_email_address': 'jane@outlook.com'}
+        api = Year()
+        data = emailbison.collect(api, days=21, today=datetime.date(2026, 10, 25), say=lambda m: None, lookup=False)
+        self.assertLess(api.read, 2 * (21 * 50 + 50) + 10)
+        self.assertEqual(len(data.bounces), 21 * 50)
+
+    def test_live_mode_reads_new_bounces_and_alerts_on_a_burst(self):
+        import datetime
+        from inboxsitrep import emailbison, live
+        now = datetime.datetime.now(datetime.timezone.utc)
+        refusal = ('550 5.7.1 Gmail has detected that this message is likely suspicious due to the very '
+                   'low reputation of the sending domain. x%d@gmail.com')
+
+        class Fake:
+            def pages(self, path, **p):
+                if p.get('folder') != 'bounced':
+                    return iter([])
+                return iter([{'date_received': (now - datetime.timedelta(minutes=m)).strftime('%Y-%m-%dT%H:%M:%S.000000Z'),
+                              'primary_to_email_address': 'a@acme.com', 'lead': {'email': 'x%d@gmail.com' % m},
+                              'text_body': refusal % m} for m in list(range(25)) + [300, 301]])
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, 'f.db')
+            store.connect(db).close()
+            fired = live.cycle(Fake(), db, say=lambda m: None, reader=emailbison.poll)
+            evs = live.events(db)
+        self.assertEqual(len(evs), 25)                  # the two from hours ago were seen before
+        self.assertEqual({(e['domain'], e['provider']) for e in evs}, {('acme.com', 'google')})
+        self.assertNotIn('@gmail.com', json.dumps(evs))
+        self.assertEqual(len(fired), 1)
+        self.assertIn('acme.com', fired[0]['title'])
+
+
+class NothingSentYet(unittest.TestCase):
+
+    def test_an_empty_workspace_is_not_a_failure_and_waits_for_the_next_round(self):
+        import datetime
+        from inboxsitrep import app
+
+        class Empty:
+            calls = 0
+
+            def pages(self, path, **p):
+                return iter([])
+
+            def get(self, path, **p):
+                return {'data': []}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(app, 'DATA', tmp):
+            settings = app.Settings(os.path.join(tmp, 'config.json'))
+            settings.update({'fleets': [{'name': 'New', 'sequencer': 'emailbison', 'key': 'k',
+                                         'base_url': 'https://send.example.com'}], 'analyst': False, 'desktop': False})
+            settings.cfg.update(report_at=[], weekly={})
+            c = app.Checker(settings, [])
+            f = settings.cfg['fleets'][0]
+            self.assertTrue(c.due(f))
+            with mock.patch.object(watch, 'client', lambda fleet, secret=None: Empty()):
+                c.wake.set()                    # no waiting for the next round
+                c.round()
+            self.assertEqual(c.failed, {})
+            self.assertFalse(os.path.exists(f['db']))
+            self.assertTrue(any('nothing to check yet' in line for line in c.state['log']))
+            self.assertFalse(c.due(f))
+            self.assertGreater(c.next_due(settings.cfg), datetime.datetime.now().isoformat(timespec='minutes'))
+
+
+class AddMany(unittest.TestCase):
+
+    def test_many_workspaces_from_a_csv_each_key_tried_first(self):
+        import io
+        from inboxsitrep import __main__ as cli
+
+        def probe(f, secret=None):
+            if secret != 'good':
+                raise ValueError('EmailBison refused it: Unauthenticated')
+            return 'The key works.'
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(watch, 'probe', probe), \
+                mock.patch('sys.stdout', io.StringIO()) as out:
+            sheet, cfg = os.path.join(tmp, 'workspaces.csv'), os.path.join(tmp, 'config.json')
+            with open(sheet, 'w') as f:
+                f.write('Name,Key,base_url\nOne,good,\nTwo,bad,\n,good,\nThree,good,https://other.example.com/api\n')
+            cli.main(['add', sheet, '--sequencer', 'emailbison', '--base-url', 'https://send.example.com',
+                      '--config', cfg])
+            with open(cfg) as f:
+                saved = json.load(f)
+            files = [x['key_file'] for x in saved['fleets']]
+            modes = [os.stat(p).st_mode & 0o777 for p in files]
+        said = out.getvalue()
+        self.assertEqual([x['name'] for x in saved['fleets']], ['One', 'Three'])
+        self.assertEqual([x['base_url'] for x in saved['fleets']],
+                         ['https://send.example.com', 'https://other.example.com/api'])
+        self.assertNotIn('good', json.dumps(saved))     # keys live in their own files
+        if os.name != 'nt':
+            self.assertEqual(modes, [0o600, 0o600])
+        self.assertIn('Two: left out, EmailBison refused it', said)
+        self.assertIn('row 3: left out', said)
+        self.assertIn('2 of 4 added.', said)
+
+
+class Window(unittest.TestCase):
+
+    def test_only_the_apps_own_window_asks_before_closing(self):
+        from inboxsitrep import window
+        fake = mock.Mock()
+        with mock.patch.dict(sys.modules, {'webview': fake}):
+            self.assertTrue(window.open_window('http://127.0.0.1:1/?t=x', owner=True))
+            window.open_window('http://127.0.0.1:1/?t=x')
+        self.assertEqual([c.kwargs['confirm_close'] for c in fake.create_window.call_args_list], [True, False])
+
 
 class InstantlyChanges(unittest.TestCase):
 
@@ -1071,7 +1215,7 @@ class AppServer(unittest.TestCase):
                 self.assertEqual(code, 200)
                 self.assertNotIn('SECRET', json.dumps(state))
                 self.assertTrue(state['settings']['notify']['has_telegram_key'])
-                self.assertEqual(len(state['settings']['notify']['telegram']['code']), 6)
+                self.assertRegex(state['settings']['notify']['telegram']['code'], r'^[A-Z2-9]{4}-[A-Z2-9]{4}$')
                 inc = next(i for i in fleets[0].incidents if i['plan'])
                 code, act = call('/api/app/preview', 'POST', {'fleet': 'Demo', 'incident': inc['id'], 'step': 0})
                 self.assertEqual(code, 200)
@@ -1080,6 +1224,146 @@ class AppServer(unittest.TestCase):
                 server.shutdown()
             finally:
                 app.HOME, notify.KEYS = real_home, real_keys
+
+
+class Safety(unittest.TestCase):
+    # What keeps one client's data, and the keys, where they belong.
+
+    def test_the_analyst_gets_no_tool_that_changes_anything(self):
+        from inboxsitrep import agent, mcp
+        f = mcp.Fleets([])
+        f.read_only = True
+        names = [t['name'] for t in mcp.handle(f, {'method': 'tools/list', 'id': 1})['tools']]
+        self.assertTrue(names)
+        self.assertFalse(set(names) & mcp.CHANGES)
+        out = mcp.handle(f, {'method': 'tools/call', 'id': 2,
+                             'params': {'name': 'apply_change', 'arguments': {'change_id': 'x'}}})
+        self.assertTrue(out['isError'])
+        f.read_only = False
+        self.assertTrue(mcp.CHANGES <= {t['name'] for t in mcp.handle(f, {'method': 'tools/list', 'id': 3})['tools']})
+        seen = {}
+        with mock.patch.object(agent, 'claude', lambda: 'claude'), \
+                mock.patch.object(agent, 'run', lambda prompt, system, mcp=None, **k: seen.update(mcp=mcp) or ('ok', None)):
+            agent.ask('which domains should I pause?', ['a.db'])
+        self.assertEqual(seen['mcp'][0], '--read-only')
+
+    def test_apply_stays_on_its_workspace_and_undo_needs_changes_on(self):
+        from inboxsitrep import web
+        with tempfile.TemporaryDirectory() as tmp:
+            dbs = {}
+            for name in ('Demo', 'Other'):
+                dbs[name] = os.path.join(tmp, name + '.db')
+                fleet = run_fleet(sim.standard(sim.Fleet(2)), 40)
+                store.save(fleet.data, dbs[name], meta={'workspace': name})
+                incidents.save(incidents.track(fleet.data), dbs[name])
+
+            class Settings:
+                cfg = {'fleets': [{'name': 'Demo', 'sequencer': 'sim', 'db': dbs['Demo']},
+                                  {'name': 'Other', 'sequencer': 'plusvibe', 'workspace': 'w', 'db': dbs['Other']}]}
+            app = {'settings': Settings(), 'fleets': [web.Fleet(dbs['Demo']), web.Fleet(dbs['Other'])], 'pending': {}}
+            inc = next(i for i in app['fleets'][0].incidents if i['plan'])
+            act = web.change_post(app, 'preview', {'fleet': 'Demo', 'incident': inc['id'], 'step': 0})
+            with self.assertRaises(ValueError) as e:
+                web.change_post(app, 'apply', {'fleet': 'Other', 'id': act['id']})
+            self.assertIn('that preview is for Demo', str(e.exception))
+            with self.assertRaises(ValueError) as e:
+                web.change_post(app, 'undo', {'fleet': 'Other', 'id': 'x'})
+            self.assertIn('changes are off for Other', str(e.exception))
+            # No workspace named: the preview's own, not the first one.
+            app['fleets'].reverse()
+            self.assertEqual(web.change_post(app, 'apply', {'id': act['id']})['status'], 'applied (simulated)')
+
+    def test_the_dashboard_on_its_own_needs_its_token(self):
+        import threading
+        import http.client
+        import http.server
+        from inboxsitrep import web
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, 'demo.db')
+            store.save(run_fleet(sim.standard(sim.Fleet(2)), 20).data, db, meta={'workspace': 'Demo'})
+            token = web.dashboard_token(os.path.join(tmp, 'keys'))
+            self.assertEqual(token, web.dashboard_token(os.path.join(tmp, 'keys')))   # kept
+            if os.name != 'nt':
+                self.assertEqual(os.stat(os.path.join(tmp, 'keys', 'dashboard.key')).st_mode & 0o777, 0o600)
+            server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), None)
+            port = server.server_address[1]
+            server.RequestHandlerClass = web.handler([web.Fleet(db)], guard={'token': token, 'port': port})
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+
+            def status(path, method='GET', **h):
+                c = http.client.HTTPConnection('127.0.0.1', port, timeout=20)
+                c.request(method, path, body='{}' if method == 'POST' else None, headers=h)
+                r = c.getresponse()
+                r.read()
+                return r.status
+            try:
+                self.assertEqual(status('/api/summary'), 403)
+                self.assertEqual(status('/api/ask', 'POST', **{'Content-Type': 'text/plain'}), 403)
+                self.assertEqual(status('/api/summary', **{'X-Token': token, 'Host': 'rebound.example:%d' % port}), 403)
+                self.assertEqual(status('/api/summary', **{'X-Token': token}), 200)
+                self.assertEqual(status('/../../etc/passwd'), 403)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_slack_answers_only_people_in_your_own_slack(self):
+        from inboxsitrep import slackbot
+        bot = slackbot.Bot(lambda: ('b', 'a'), lambda q: 'answer')
+        started = []
+
+        class Ws:
+            def send(self, m):
+                pass
+
+        def event(ts, team=None, shared=False):
+            ev = {'type': 'app_mention', 'text': '<@U0> how are we?', 'ts': ts, 'channel': 'C1', 'user': 'U1'}
+            if team:
+                ev['user_team'] = team
+            return {'type': 'events_api', 'payload': {'team_id': 'T1', 'is_ext_shared_channel': shared, 'event': ev}}
+        with mock.patch.object(slackbot.threading, 'Thread',
+                               lambda target, args, daemon: mock.Mock(start=lambda: started.append(args))):
+            bot.handle(event('1', shared=True), Ws(), 'b')         # a Slack Connect channel
+            bot.handle(event('2', team='T2'), Ws(), 'b')           # someone from another company
+            self.assertEqual(started, [])
+            bot.handle(event('3', team='T1'), Ws(), 'b')
+            bot.handle(event('4'), Ws(), 'b')
+        self.assertEqual(len(started), 2)
+
+    def test_telegram_pairs_only_on_the_whole_code_sent_after_it_was_made(self):
+        from inboxsitrep import app, telegram
+        code = app.pairing_code()
+        self.assertRegex(code, r'^[A-Z2-9]{4}-[A-Z2-9]{4}$')
+        self.assertTrue(telegram.pairs(code.lower().replace('-', ' '), code))
+        self.assertTrue(telegram.pairs('/start ' + code, code))
+        self.assertFalse(telegram.pairs('try ' + code, code))
+        self.assertFalse(telegram.pairs('0123456789' * 400, '345678'))       # six digits, tried by the thousand
+
+        class Settings:
+            def save(self):
+                pass
+        bot = telegram.Bot(Settings(), lambda q: '')
+        tg = {'code': code, 'made': 1000, 'chat_id': None}
+        with mock.patch.object(telegram, 'send', lambda *a: None):
+            bot.handle('t', tg, {'chat': {'id': 7}, 'text': code, 'date': 999})
+            self.assertIsNone(tg['chat_id'])
+            bot.handle('t', tg, {'chat': {'id': 8}, 'text': code, 'date': 1001})
+        self.assertEqual(tg['chat_id'], 8)
+
+    def test_emailbison_keys_go_only_to_your_instance_over_https(self):
+        from inboxsitrep import app, emailbison
+        with self.assertRaises(ValueError):
+            emailbison.Client('k', 'http://send.example.com')
+        emailbison.Client('k', 'http://127.0.0.1:8080')              # a local test server is fine
+        self.assertIsNone(emailbison.Stay().redirect_request(None, None, 301, 'Moved', {}, 'https://elsewhere.example'))
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = app.Settings(os.path.join(tmp, 'config.json'))
+            settings.update({'fleets': [{'name': 'Main', 'sequencer': 'emailbison', 'key': 'k',
+                                         'base_url': 'https://send.example.com'}]})
+            with self.assertRaises(ValueError):
+                settings.update({'fleets': [{'name': 'Main', 'base_url': 'https://collector.example'}]})
+            settings.update({'fleets': [{'name': 'Main', 'base_url': 'https://send.example.com/'}]})    # the same address
+            settings.update({'fleets': [{'name': 'Main', 'base_url': 'https://new.example.com', 'key': 'k2'}]})
+            self.assertEqual(settings.cfg['fleets'][0]['base_url'], 'https://new.example.com')
 
 
 class Brief(unittest.TestCase):
@@ -1448,7 +1732,7 @@ class FirstLook(unittest.TestCase):
                                              io.BytesIO(b'{"message": "Invalid Api key"}'))
         f = {'name': 'Main', 'sequencer': 'plusvibe', 'workspace': 'w', 'key_env': 'INBOXSITREP_TEST_KEY'}
         with mock.patch.dict(os.environ, {'INBOXSITREP_TEST_KEY': 'k'}), \
-                mock.patch.object(watch, 'client', lambda fleet: Refuses()):
+                mock.patch.object(watch, 'client', lambda fleet, secret=None: Refuses()):
             with self.assertRaises(ValueError) as e:
                 watch.probe(f)
         self.assertEqual(str(e.exception), 'PlusVibe refused it: Invalid Api key.  Check the key and the workspace id')

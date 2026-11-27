@@ -12,7 +12,10 @@ import subprocess
 import webbrowser
 
 
-def gtk(url, title, width, height):
+CLOSING = ('Close Inbox Sitrep?', 'The checks and alerts stop until you open it again.')
+
+
+def gtk(url, title, width, height, owner=False):
     import gi
     gi.require_version('Gtk', '3.0')
     gi.require_version('WebKit2', '4.1')
@@ -35,6 +38,19 @@ def gtk(url, title, width, height):
                 return True
         return False
     view.connect('decide-policy', outside)
+
+    def closing(win, event):
+        # The window the app opened with is the app: closing it ends the
+        # watch, so it asks.  Another window onto it just closes.
+        ask = Gtk.MessageDialog(transient_for=win, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                buttons=Gtk.ButtonsType.NONE, text=CLOSING[0])
+        ask.format_secondary_text(CLOSING[1])
+        ask.add_buttons('Keep it open', Gtk.ResponseType.CANCEL, 'Close', Gtk.ResponseType.CLOSE)
+        answer = ask.run()
+        ask.destroy()
+        return answer != Gtk.ResponseType.CLOSE         # True keeps the window
+    if owner:
+        win.connect('delete-event', closing)
     view.load_uri(url)
     win.add(view)
     win.connect('destroy', Gtk.main_quit)
@@ -62,17 +78,18 @@ def browser(url):
     return False
 
 
-def open_window(url, title='Inbox Sitrep', width=1440, height=920):
-    # Returns True when it blocked until the window was closed.
+def open_window(url, title='Inbox Sitrep', width=1440, height=920, owner=False):
+    # Returns True when it blocked until the window was closed.  owner: the
+    # app's own window, which asks before closing.
     try:
         import webview
-        webview.create_window(title, url, width=width, height=height)
+        webview.create_window(title, url, width=width, height=height, confirm_close=owner)
         webview.start()
         return True
     except ImportError:
         pass
     try:
-        gtk(url, title, width, height)
+        gtk(url, title, width, height, owner)
         return True
     except (ImportError, ValueError):
         return browser(url)
